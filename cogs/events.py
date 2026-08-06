@@ -323,6 +323,15 @@ class EventsCog(commands.Cog, name="EventsCog"):
     # Вспомогательное (используется и веб-панелью)
     # ------------------------------------------------------------------
 
+    async def _resolve_member(self, guild: discord.Guild, user_id: int):
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except discord.HTTPException:
+                member = None
+        return member
+
     async def _grant_access(self, guild: discord.Guild, event: dict, member: discord.Member):
         if event.get("role_id"):
             role = guild.get_role(event["role_id"])
@@ -346,7 +355,7 @@ class EventsCog(commands.Cog, name="EventsCog"):
         if event.get("role_id"):
             role = guild.get_role(event["role_id"])
             if role:
-                m = member if isinstance(member, discord.Member) else guild.get_member(member.id)
+                m = member if isinstance(member, discord.Member) else await self._resolve_member(guild, member.id)
                 if m:
                     try:
                         await m.remove_roles(role, reason=f"Выход из события #{event['id']}")
@@ -385,7 +394,7 @@ class EventsCog(commands.Cog, name="EventsCog"):
             role = guild.get_role(event["role_id"])
             if role:
                 for p in participants:
-                    member = guild.get_member(p["user_id"])
+                    member = await self._resolve_member(guild, p["user_id"])
                     if member:
                         try:
                             await member.remove_roles(role, reason=f"Событие #{event['id']} удалено/закрыто")

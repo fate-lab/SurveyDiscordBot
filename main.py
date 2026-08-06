@@ -10,9 +10,6 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("survey-bot")
 
 intents = discord.Intents.default()
-# Нужен, чтобы бот мог находить участников по ID (снятие роли/доступа у события,
-# когда пользователь уже вышел из кэша интеракции).
-intents.members = True
 
 
 class SurveyBot(commands.Bot):
