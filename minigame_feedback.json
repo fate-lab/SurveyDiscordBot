@@ -4,6 +4,7 @@
   "outro": "Спасибо за ответы! Твоё мнение реально помогает сделать игру лучше ❤️",
   "anonymous": true,
   "allow_multiple": false,
+  "lang": "ru",
   "questions": [
     {
       "type": "scale",
@@ -42,7 +43,8 @@
         "Соревновательный момент",
         "Возможность играть с друзьями"
       ],
-      "other_option": true
+      "other_option": true,
+      "other_label": "Своё"
     },
     {
       "type": "multi",

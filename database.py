@@ -2,6 +2,8 @@ import json
 import datetime
 import aiosqlite
 
+from i18n import DEFAULT_LANG
+
 
 class Database:
     def __init__(self, path: str):
@@ -22,7 +24,8 @@ class Database:
                 anonymous INTEGER NOT NULL DEFAULT 1,
                 allow_multiple INTEGER NOT NULL DEFAULT 0,
                 creator_id INTEGER,
-                created_at TEXT
+                created_at TEXT,
+                lang TEXT NOT NULL DEFAULT 'ru'
             )
             """
         )
@@ -38,19 +41,75 @@ class Database:
             )
             """
         )
+        await self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                capacity INTEGER NOT NULL,
+                event_dt TEXT NOT NULL,
+                role_id INTEGER,
+                channel_id INTEGER,
+                announce_channel_id INTEGER,
+                announce_message_id INTEGER,
+                creator_id INTEGER,
+                created_at TEXT,
+                status TEXT NOT NULL DEFAULT 'active'
+            )
+            """
+        )
+        await self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS event_participants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'joined',
+                joined_at TEXT,
+                FOREIGN KEY(event_id) REFERENCES events(id),
+                UNIQUE(event_id, user_id)
+            )
+            """
+        )
+        await self._migrate()
         await self._conn.commit()
 
+    async def _migrate(self):
+        """Добавляет колонки, которых не было в более старых версиях базы,
+        не трогая уже сохранённые опросы/ответы."""
+        cur = await self._conn.execute("PRAGMA table_info(surveys)")
+        cols = {row[1] for row in await cur.fetchall()}
+        if "lang" not in cols:
+            await self._conn.execute(
+                f"ALTER TABLE surveys ADD COLUMN lang TEXT NOT NULL DEFAULT '{DEFAULT_LANG}'"
+            )
+
     async def create_survey(self, name, title, intro, outro, questions,
-                             anonymous, allow_multiple, creator_id):
+                             anonymous, allow_multiple, creator_id, lang=DEFAULT_LANG):
         await self._conn.execute(
             """INSERT INTO surveys
-               (name, title, intro, outro, questions, anonymous, allow_multiple, creator_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (name, title, intro, outro, questions, anonymous, allow_multiple,
+                creator_id, created_at, lang)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 name, title, intro, outro,
                 json.dumps(questions, ensure_ascii=False),
                 int(anonymous), int(allow_multiple), creator_id,
-                datetime.datetime.utcnow().isoformat(),
+                datetime.datetime.utcnow().isoformat(), lang,
+            ),
+        )
+        await self._conn.commit()
+
+    async def update_survey(self, name, title, intro, outro, questions,
+                             anonymous, allow_multiple, lang=DEFAULT_LANG):
+        await self._conn.execute(
+            """UPDATE surveys SET title=?, intro=?, outro=?, questions=?,
+               anonymous=?, allow_multiple=?, lang=? WHERE name=?""",
+            (
+                title, intro, outro, json.dumps(questions, ensure_ascii=False),
+                int(anonymous), int(allow_multiple), lang, name,
             ),
         )
         await self._conn.commit()
@@ -65,17 +124,21 @@ class Database:
         data["questions"] = json.loads(data["questions"])
         data["anonymous"] = bool(data["anonymous"])
         data["allow_multiple"] = bool(data["allow_multiple"])
+        data["lang"] = data.get("lang") or DEFAULT_LANG
         return data
 
     async def list_surveys(self):
-        cur = await self._conn.execute("SELECT name, title, questions FROM surveys ORDER BY id")
+        cur = await self._conn.execute(
+            "SELECT name, title, questions, lang FROM surveys ORDER BY id"
+        )
         rows = await cur.fetchall()
         result = []
-        for name, title, questions in rows:
+        for name, title, questions, lang in rows:
             result.append({
                 "name": name,
                 "title": title,
                 "question_count": len(json.loads(questions)),
+                "lang": lang or DEFAULT_LANG,
             })
         return result
 
@@ -113,3 +176,142 @@ class Database:
             {"user_id": r[0], "answers": json.loads(r[1]), "submitted_at": r[2]}
             for r in rows
         ]
+
+    # ------------------------------------------------------------------
+    # События (events)
+    # ------------------------------------------------------------------
+
+    async def create_event(self, guild_id, title, description, capacity,
+                            event_dt, role_id, creator_id):
+        cur = await self._conn.execute(
+            """INSERT INTO events
+               (guild_id, title, description, capacity, event_dt, role_id,
+                creator_id, created_at, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')""",
+            (
+                guild_id, title, description, capacity, event_dt, role_id,
+                creator_id, datetime.datetime.utcnow().isoformat(),
+            ),
+        )
+        await self._conn.commit()
+        return cur.lastrowid
+
+    async def set_event_message(self, event_id, channel_id, announce_channel_id, announce_message_id):
+        await self._conn.execute(
+            "UPDATE events SET channel_id=?, announce_channel_id=?, announce_message_id=? WHERE id=?",
+            (channel_id, announce_channel_id, announce_message_id, event_id),
+        )
+        await self._conn.commit()
+
+    async def update_event(self, event_id, title, description, capacity, event_dt, role_id=None):
+        if role_id is not None:
+            await self._conn.execute(
+                """UPDATE events SET title=?, description=?, capacity=?, event_dt=?, role_id=?
+                   WHERE id=?""",
+                (title, description, capacity, event_dt, role_id, event_id),
+            )
+        else:
+            await self._conn.execute(
+                """UPDATE events SET title=?, description=?, capacity=?, event_dt=?
+                   WHERE id=?""",
+                (title, description, capacity, event_dt, event_id),
+            )
+        await self._conn.commit()
+
+    async def set_event_status(self, event_id, status):
+        await self._conn.execute("UPDATE events SET status=? WHERE id=?", (status, event_id))
+        await self._conn.commit()
+
+    async def get_event(self, event_id):
+        cur = await self._conn.execute("SELECT * FROM events WHERE id = ?", (event_id,))
+        row = await cur.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cur.description]
+        return dict(zip(cols, row))
+
+    async def get_event_by_message(self, message_id):
+        cur = await self._conn.execute("SELECT * FROM events WHERE announce_message_id = ?", (message_id,))
+        row = await cur.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cur.description]
+        return dict(zip(cols, row))
+
+    async def list_events(self, guild_id=None, status=None):
+        query = "SELECT * FROM events"
+        conds, params = [], []
+        if guild_id is not None:
+            conds.append("guild_id = ?")
+            params.append(guild_id)
+        if status is not None:
+            conds.append("status = ?")
+            params.append(status)
+        if conds:
+            query += " WHERE " + " AND ".join(conds)
+        query += " ORDER BY id DESC"
+        cur = await self._conn.execute(query, params)
+        rows = await cur.fetchall()
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    async def delete_event(self, event_id):
+        await self._conn.execute("DELETE FROM event_participants WHERE event_id = ?", (event_id,))
+        await self._conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
+        await self._conn.commit()
+
+    async def get_participant(self, event_id, user_id):
+        cur = await self._conn.execute(
+            "SELECT * FROM event_participants WHERE event_id = ? AND user_id = ?",
+            (event_id, user_id),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cur.description]
+        return dict(zip(cols, row))
+
+    async def add_participant(self, event_id, user_id, status="joined"):
+        await self._conn.execute(
+            """INSERT INTO event_participants (event_id, user_id, status, joined_at)
+               VALUES (?, ?, ?, ?)""",
+            (event_id, user_id, status, datetime.datetime.utcnow().isoformat()),
+        )
+        await self._conn.commit()
+
+    async def set_participant_status(self, event_id, user_id, status):
+        await self._conn.execute(
+            "UPDATE event_participants SET status=? WHERE event_id=? AND user_id=?",
+            (status, event_id, user_id),
+        )
+        await self._conn.commit()
+
+    async def remove_participant(self, event_id, user_id):
+        await self._conn.execute(
+            "DELETE FROM event_participants WHERE event_id = ? AND user_id = ?",
+            (event_id, user_id),
+        )
+        await self._conn.commit()
+
+    async def list_participants(self, event_id, status=None):
+        if status:
+            cur = await self._conn.execute(
+                "SELECT * FROM event_participants WHERE event_id = ? AND status = ? ORDER BY id",
+                (event_id, status),
+            )
+        else:
+            cur = await self._conn.execute(
+                "SELECT * FROM event_participants WHERE event_id = ? ORDER BY id",
+                (event_id,),
+            )
+        rows = await cur.fetchall()
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    async def count_participants(self, event_id, status="joined"):
+        cur = await self._conn.execute(
+            "SELECT COUNT(*) FROM event_participants WHERE event_id = ? AND status = ?",
+            (event_id, status),
+        )
+        row = await cur.fetchone()
+        return row[0] if row else 0

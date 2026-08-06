@@ -9,6 +9,7 @@ from discord.ext import commands
 
 import config
 from csv_export import build_csv_bytes
+from i18n import t, DEFAULT_LANG, SUPPORTED_LANGS
 
 log = logging.getLogger("survey-bot")
 
@@ -31,6 +32,10 @@ def validate_questions(questions):
         if q["type"] == "scale":
             q.setdefault("min", 1)
             q.setdefault("max", 5)
+        # other_label — необязательное переопределение подписи кнопки/пункта
+        # "Другое"/"Other" для конкретного вопроса (иначе берётся из lang опроса)
+        if "other_label" in q and not str(q["other_label"]).strip():
+            q.pop("other_label", None)
 
 
 def is_survey_admin():
@@ -46,27 +51,28 @@ def is_survey_admin():
 
 
 class FreeTextModal(discord.ui.Modal):
-    def __init__(self, title: str, label: str, long: bool = False):
+    def __init__(self, title: str, label: str, long: bool = False, lang: str = DEFAULT_LANG):
         super().__init__(title=title[:45])
         self.value = None
+        self.lang = lang
         style = discord.TextStyle.paragraph if long else discord.TextStyle.short
         self.input = discord.ui.TextInput(label=label[:45], style=style, required=True, max_length=1000)
         self.add_item(self.input)
 
     async def on_submit(self, interaction: discord.Interaction):
         self.value = str(self.input.value)
-        await interaction.response.send_message("Ответ принят ✅", ephemeral=True)
+        await interaction.response.send_message(t(self.lang, "answer_received"), ephemeral=True)
         self.stop()
 
 
 class SurveyStartView(discord.ui.View):
     """Persistent view attached to the published survey message."""
 
-    def __init__(self, survey_name: str):
+    def __init__(self, survey_name: str, label: str = "📋 Пройти опрос"):
         super().__init__(timeout=None)
         self.survey_name = survey_name
         button = discord.ui.Button(
-            label="📋 Пройти опрос",
+            label=label,
             style=discord.ButtonStyle.primary,
             custom_id=f"survey_start:{survey_name}",
         )
@@ -76,7 +82,7 @@ class SurveyStartView(discord.ui.View):
     async def start_survey(self, interaction: discord.Interaction):
         cog = interaction.client.get_cog("SurveyCog")
         if cog is None:
-            await interaction.response.send_message("Бот перезагружается, попробуй чуть позже.", ephemeral=True)
+            await interaction.response.send_message(t(DEFAULT_LANG, "bot_restarting"), ephemeral=True)
             return
         await cog.begin_survey(interaction, self.survey_name)
 
@@ -89,6 +95,7 @@ class SurveyRunner:
         self.channel = channel
         self.member = member
         self.survey = survey
+        self.lang = survey.get("lang") or DEFAULT_LANG
         self.answers = {}
 
     async def run(self):
@@ -96,6 +103,9 @@ class SurveyRunner:
             answer = await self.ask(idx, q)
             self.answers[str(idx)] = {"question": q["text"], "answer": answer}
         await self.finish()
+
+    def _other_label(self, q):
+        return q.get("other_label") or t(self.lang, "other_option_label")
 
     async def ask(self, idx, q):
         qtype = q["type"]
@@ -115,7 +125,7 @@ class SurveyRunner:
         try:
             result = await asyncio.wait_for(future, timeout=600)
         except asyncio.TimeoutError:
-            result = "(нет ответа — время вышло)"
+            result = t(self.lang, "timeout_answer")
         for item in view.children:
             item.disabled = True
         try:
@@ -148,21 +158,22 @@ class SurveyRunner:
         future = asyncio.get_event_loop().create_future()
         options = list(q["options"])
         has_other = q.get("other_option", False)
+        other_label = self._other_label(q)
         select_options = [discord.SelectOption(label=o[:100], value=o) for o in options]
         if has_other:
-            select_options.append(discord.SelectOption(label="Другое", value="__other__"))
+            select_options.append(discord.SelectOption(label=other_label[:100], value="__other__"))
         view = discord.ui.View(timeout=600)
-        select = discord.ui.Select(placeholder="Выбери вариант...", options=select_options,
-                                    min_values=1, max_values=1)
+        select = discord.ui.Select(placeholder=t(self.lang, "select_single_placeholder"),
+                                    options=select_options, min_values=1, max_values=1)
 
         async def cb(interaction):
             value = select.values[0]
             if value == "__other__":
-                modal = FreeTextModal(title="Другое", label="Уточни свой вариант")
+                modal = FreeTextModal(title=other_label, label=t(self.lang, "other_modal_label"), lang=self.lang)
                 await interaction.response.send_modal(modal)
                 await modal.wait()
                 if not future.done():
-                    future.set_result(f"Другое: {modal.value or ''}")
+                    future.set_result(f"{other_label}: {modal.value or ''}")
             else:
                 await interaction.response.defer()
                 if not future.done():
@@ -177,15 +188,16 @@ class SurveyRunner:
         future = asyncio.get_event_loop().create_future()
         options = list(q["options"])
         has_other = q.get("other_option", False)
+        other_label = self._other_label(q)
         select_options = [discord.SelectOption(label=o[:100], value=o) for o in options]
         if has_other:
-            select_options.append(discord.SelectOption(label="Другое", value="__other__"))
+            select_options.append(discord.SelectOption(label=other_label[:100], value="__other__"))
         view = discord.ui.View(timeout=600)
         select = discord.ui.Select(
-            placeholder="Выбери один или несколько вариантов...",
+            placeholder=t(self.lang, "select_multi_placeholder"),
             options=select_options, min_values=1, max_values=len(select_options),
         )
-        confirm_btn = discord.ui.Button(label="✅ Готово", style=discord.ButtonStyle.success)
+        confirm_btn = discord.ui.Button(label=t(self.lang, "done_button"), style=discord.ButtonStyle.success)
         state = {"values": []}
 
         async def select_cb(interaction):
@@ -195,15 +207,15 @@ class SurveyRunner:
         async def confirm_cb(interaction):
             values = state["values"]
             if not values:
-                await interaction.response.send_message("Выбери хотя бы один вариант перед тем, как нажать «Готово».", ephemeral=True)
+                await interaction.response.send_message(t(self.lang, "multi_need_one"), ephemeral=True)
                 return
             if "__other__" in values:
-                modal = FreeTextModal(title="Другое", label="Уточни свой вариант")
+                modal = FreeTextModal(title=other_label, label=t(self.lang, "other_modal_label"), lang=self.lang)
                 await interaction.response.send_modal(modal)
                 await modal.wait()
                 values = [v for v in values if v != "__other__"]
                 if modal.value:
-                    values.append(f"Другое: {modal.value}")
+                    values.append(f"{other_label}: {modal.value}")
             else:
                 await interaction.response.defer()
             if not future.done():
@@ -213,26 +225,32 @@ class SurveyRunner:
         confirm_btn.callback = confirm_cb
         view.add_item(select)
         view.add_item(confirm_btn)
-        msg = await self.channel.send(f"**{idx + 1}. {q['text']}** _(можно выбрать несколько, затем нажми «Готово»)_", view=view)
+        hint = t(self.lang, "multi_hint")
+        msg = await self.channel.send(f"**{idx + 1}. {q['text']}**{hint}", view=view)
         return await self._wait(future, view, msg)
 
     async def _ask_yes_no_detail(self, idx, q):
         future = asyncio.get_event_loop().create_future()
         view = discord.ui.View(timeout=600)
-        yes_btn = discord.ui.Button(label=q.get("yes_label", "Да"), style=discord.ButtonStyle.success)
-        no_btn = discord.ui.Button(label=q.get("no_label", "Нет"), style=discord.ButtonStyle.secondary)
+        yes_label = q.get("yes_label") or t(self.lang, "yes_label_default")
+        no_label = q.get("no_label") or t(self.lang, "no_label_default")
+        yes_btn = discord.ui.Button(label=yes_label, style=discord.ButtonStyle.success)
+        no_btn = discord.ui.Button(label=no_label, style=discord.ButtonStyle.secondary)
 
         async def yes_cb(interaction):
-            modal = FreeTextModal(title="Опиши коротко", label="Что случилось?", long=True)
+            modal = FreeTextModal(
+                title=t(self.lang, "yes_modal_title"), label=t(self.lang, "yes_modal_label"),
+                long=True, lang=self.lang,
+            )
             await interaction.response.send_modal(modal)
             await modal.wait()
             if not future.done():
-                future.set_result(f"Да: {modal.value or ''}")
+                future.set_result(f"{yes_label}: {modal.value or ''}")
 
         async def no_cb(interaction):
             await interaction.response.defer()
             if not future.done():
-                future.set_result("Нет")
+                future.set_result(no_label)
 
         yes_btn.callback = yes_cb
         no_btn.callback = no_cb
@@ -244,10 +262,13 @@ class SurveyRunner:
     async def _ask_text(self, idx, q):
         future = asyncio.get_event_loop().create_future()
         view = discord.ui.View(timeout=600)
-        btn = discord.ui.Button(label="✍️ Ответить", style=discord.ButtonStyle.primary)
+        btn = discord.ui.Button(label=t(self.lang, "answer_button"), style=discord.ButtonStyle.primary)
 
         async def cb(interaction):
-            modal = FreeTextModal(title="Твой ответ", label=q["text"][:45], long=True)
+            modal = FreeTextModal(
+                title=t(self.lang, "answer_modal_title"), label=q["text"][:45],
+                long=True, lang=self.lang,
+            )
             await interaction.response.send_modal(modal)
             await modal.wait()
             if not future.done():
@@ -261,9 +282,9 @@ class SurveyRunner:
     async def finish(self):
         survey = await self.cog.bot.db.get_survey(self.survey["name"])
         await self.cog.bot.db.save_response(survey["id"], self.member.id, self.answers)
-        outro = self.survey.get("outro") or "Спасибо за ответы! 🙏"
+        outro = self.survey.get("outro") or t(self.lang, "default_outro")
         await self.channel.send(outro)
-        await self.channel.send("_Этот канал будет автоматически удалён через 20 секунд..._")
+        await self.channel.send(t(self.lang, "channel_autodelete"))
         await asyncio.sleep(20)
         try:
             await self.channel.delete()
@@ -293,6 +314,9 @@ class SurveyCog(commands.Cog, name="SurveyCog"):
             data = json.loads(raw.decode("utf-8"))
             questions = data["questions"]
             validate_questions(questions)
+            lang = data.get("lang", DEFAULT_LANG)
+            if lang not in SUPPORTED_LANGS:
+                raise ValueError(f"'lang' должен быть одним из {SUPPORTED_LANGS}, получено '{lang}'")
         except Exception as e:
             await interaction.followup.send(f"❌ Ошибка в JSON-файле: {e}", ephemeral=True)
             return
@@ -305,9 +329,10 @@ class SurveyCog(commands.Cog, name="SurveyCog"):
             anonymous=data.get("anonymous", True),
             allow_multiple=data.get("allow_multiple", False),
             creator_id=interaction.user.id,
+            lang=lang,
         )
         await interaction.followup.send(
-            f"✅ Опрос `{name}` создан ({len(questions)} вопрос(ов)).\n"
+            f"✅ Опрос `{name}` создан ({len(questions)} вопрос(ов), язык: {lang}).\n"
             f"Опубликуй его командой `/survey publish name:{name}` в нужном канале.",
             ephemeral=True,
         )
@@ -324,7 +349,8 @@ class SurveyCog(commands.Cog, name="SurveyCog"):
             description=survey.get("intro") or "",
             color=discord.Color.blurple(),
         )
-        view = SurveyStartView(name)
+        lang = survey.get("lang") or DEFAULT_LANG
+        view = SurveyStartView(name, label=t(lang, "take_survey_button"))
         await interaction.response.send_message(embed=embed, view=view)
 
     @survey_group.command(name="list", description="Список всех созданных опросов")
@@ -381,10 +407,11 @@ class SurveyCog(commands.Cog, name="SurveyCog"):
     async def begin_survey(self, interaction: discord.Interaction, survey_name: str):
         survey = await self.bot.db.get_survey(survey_name)
         if not survey:
-            await interaction.response.send_message("Этот опрос больше не существует.", ephemeral=True)
+            await interaction.response.send_message(t(DEFAULT_LANG, "survey_gone"), ephemeral=True)
             return
+        lang = survey.get("lang") or DEFAULT_LANG
         if not survey["allow_multiple"] and await self.bot.db.has_responded(survey["id"], interaction.user.id):
-            await interaction.response.send_message("Ты уже проходил(а) этот опрос. Спасибо! 🙏", ephemeral=True)
+            await interaction.response.send_message(t(lang, "already_responded"), ephemeral=True)
             return
 
         guild = interaction.guild
@@ -403,12 +430,15 @@ class SurveyCog(commands.Cog, name="SurveyCog"):
                 overwrites[role] = discord.PermissionOverwrite(view_channel=True, read_message_history=True)
 
         safe_name = "".join(c for c in interaction.user.display_name.lower() if c.isalnum()) or "user"
+        prefix = t(lang, "channel_prefix")
         channel = await guild.create_text_channel(
-            name=f"опрос-{safe_name}"[:90],
+            name=f"{prefix}{safe_name}"[:90],
             category=category,
             overwrites=overwrites,
         )
-        await interaction.response.send_message(f"✅ Опрос открыт в {channel.mention}", ephemeral=True)
+        await interaction.response.send_message(
+            t(lang, "opened_in_channel", channel=channel.mention), ephemeral=True
+        )
 
         runner = SurveyRunner(self, channel, interaction.user, survey)
         self.bot.loop.create_task(self._run_safely(runner))
@@ -419,7 +449,7 @@ class SurveyCog(commands.Cog, name="SurveyCog"):
         except Exception:
             log.exception("Survey run failed")
             try:
-                await runner.channel.send("⚠️ Произошла ошибка при прохождении опроса. Обратись к администратору.")
+                await runner.channel.send(t(runner.lang, "run_error"))
             except Exception:
                 pass
 

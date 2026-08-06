@@ -10,6 +10,7 @@ TOKEN = os.getenv("DISCORD_TOKEN", "")
 ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", "0") or 0)
 DB_PATH = os.getenv("DB_PATH", "surveys.db")
 CATEGORY_NAME = os.getenv("SURVEY_CATEGORY", "📋 Опросы")
+EVENT_CATEGORY_NAME = os.getenv("EVENT_CATEGORY", "🎫 События")
 
 # --- Веб-панель ---
 # WEB_PORT должен совпадать с портом, который выдал хостинг (Wispbyte и т.п.),

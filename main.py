@@ -10,6 +10,9 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("survey-bot")
 
 intents = discord.Intents.default()
+# Нужен, чтобы бот мог находить участников по ID (снятие роли/доступа у события,
+# когда пользователь уже вышел из кэша интеракции).
+intents.members = True
 
 
 class SurveyBot(commands.Bot):
@@ -20,15 +23,27 @@ class SurveyBot(commands.Bot):
     async def setup_hook(self):
         await self.db.init()
         await self.load_extension("cogs.survey")
+        await self.load_extension("cogs.events")
 
         # Re-register persistent button views so they keep working after a restart.
         from cogs.survey import SurveyStartView
+        from i18n import t, DEFAULT_LANG
         surveys = await self.db.list_surveys()
         for s in surveys:
-            self.add_view(SurveyStartView(s["name"]))
+            lang = s.get("lang") or DEFAULT_LANG
+            self.add_view(SurveyStartView(s["name"], label=t(lang, "take_survey_button")))
+
+        from cogs.events import EventCardView
+        events = await self.db.list_events()
+        for e in events:
+            if e.get("announce_message_id"):
+                self.add_view(EventCardView(e["id"]))
 
         synced = await self.tree.sync()
-        log.info(f"Synced {len(synced)} slash commands, restored {len(surveys)} survey views")
+        log.info(
+            f"Synced {len(synced)} slash commands, restored {len(surveys)} survey views, "
+            f"{len(events)} event cards"
+        )
 
         # Веб-панель поднимается в том же процессе/event loop, чтобы делить
         # с ботом единственный порт, доступный на бесплатных тарифах хостинга.
