@@ -21,6 +21,7 @@ class SurveyBot(commands.Bot):
         await self.db.init()
         await self.load_extension("cogs.survey")
         await self.load_extension("cogs.events")
+        await self.load_extension("cogs.language")
 
         # Re-register persistent button views so they keep working after a restart.
         from cogs.survey import SurveyStartView
@@ -35,6 +36,9 @@ class SurveyBot(commands.Bot):
         for e in events:
             if e.get("announce_message_id"):
                 self.add_view(EventCardView(e["id"]))
+
+        from cogs.language import LanguageSelectView
+        self.add_view(LanguageSelectView())
 
         synced = await self.tree.sync()
         log.info(

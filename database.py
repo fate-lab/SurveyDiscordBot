@@ -73,6 +73,23 @@ class Database:
             )
             """
         )
+        await self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_language (
+                user_id INTEGER PRIMARY KEY,
+                lang TEXT NOT NULL DEFAULT 'en'
+            )
+            """
+        )
+        await self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS lang_channels (
+                guild_id INTEGER PRIMARY KEY,
+                channel_id INTEGER,
+                message_id INTEGER
+            )
+            """
+        )
         await self._migrate()
         await self._conn.commit()
 
@@ -315,3 +332,46 @@ class Database:
         )
         row = await cur.fetchone()
         return row[0] if row else 0
+
+    # ------------------------------------------------------------------
+    # Язык пользователя
+    # ------------------------------------------------------------------
+
+    async def get_user_lang(self, user_id) -> str:
+        cur = await self._conn.execute("SELECT lang FROM user_language WHERE user_id = ?", (user_id,))
+        row = await cur.fetchone()
+        return row[0] if row else "en"
+
+    async def set_user_lang(self, user_id, lang: str):
+        await self._conn.execute(
+            """INSERT INTO user_language (user_id, lang) VALUES (?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET lang = excluded.lang""",
+            (user_id, lang),
+        )
+        await self._conn.commit()
+
+    async def count_users_by_lang(self):
+        cur = await self._conn.execute("SELECT lang, COUNT(*) FROM user_language GROUP BY lang")
+        rows = await cur.fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    async def set_lang_channel(self, guild_id, channel_id, message_id):
+        await self._conn.execute(
+            """INSERT INTO lang_channels (guild_id, channel_id, message_id) VALUES (?, ?, ?)
+               ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id,
+                                                    message_id = excluded.message_id""",
+            (guild_id, channel_id, message_id),
+        )
+        await self._conn.commit()
+
+    async def get_lang_channel(self, guild_id):
+        cur = await self._conn.execute(
+            "SELECT channel_id, message_id FROM lang_channels WHERE guild_id = ?", (guild_id,)
+        )
+        row = await cur.fetchone()
+        return {"channel_id": row[0], "message_id": row[1]} if row else None
+
+    async def list_lang_channels(self):
+        cur = await self._conn.execute("SELECT guild_id, channel_id, message_id FROM lang_channels")
+        rows = await cur.fetchall()
+        return [{"guild_id": r[0], "channel_id": r[1], "message_id": r[2]} for r in rows]

@@ -15,6 +15,47 @@ STATUS_COLORS = {
     "closed": discord.Color.dark_grey(),
 }
 
+# Тексты на карточке (embed, подписи кнопок) видят ВСЕ участники сразу —
+# Discord не умеет показывать разный текст разным людям на одном сообщении,
+# поэтому здесь всегда английский по умолчанию.
+# А вот эфемерные ответы на нажатия кнопок видит только сам нажавший —
+# их можно показывать на языке, который человек выбрал в /language setup.
+PLAYER_MSGS = {
+    "en": {
+        "event_gone": "This event no longer exists.",
+        "signup_closed": "Signups for this event are closed.",
+        "already_joined": "You're already signed up for this event ✅",
+        "already_waiting": "You're already on the waitlist for this event ⏳",
+        "joined": "✅ You're signed up for **{title}**. Access to {channel} is now open.",
+        "waitlisted": "⏳ No spots left — you've been added to the waitlist (position {pos}). "
+                       "The organizer can approve you from the waitlist if a spot opens up.",
+        "not_signed_up": "You're not signed up for this event.",
+        "left_joined": "🚪 Signup cancelled — your role and channel access were removed.",
+        "left_waiting": "🚪 You left the waitlist.",
+        "welcome": "👋 {mention} just joined the event!",
+        "private_channel_fallback": "the private channel",
+    },
+    "ru": {
+        "event_gone": "Это событие больше не существует.",
+        "signup_closed": "Набор на это событие закрыт.",
+        "already_joined": "Ты уже записан(а) на это событие ✅",
+        "already_waiting": "Ты уже в листе ожидания на это событие ⏳",
+        "joined": "✅ Записал(а) тебя на «{title}». Доступ к {channel} открыт.",
+        "waitlisted": "⏳ Мест нет — ты добавлен(а) в лист ожидания (позиция {pos}). "
+                       "Организатор может одобрить тебя из листа ожидания, если появятся места.",
+        "not_signed_up": "Ты не записан(а) на это событие.",
+        "left_joined": "🚪 Запись отменена, доступ к приватному каналу и роль сняты.",
+        "left_waiting": "🚪 Ты вышел(а) из листа ожидания.",
+        "welcome": "👋 {mention} присоединился(ась) к событию!",
+        "private_channel_fallback": "приватном канале",
+    },
+}
+
+
+def pm(lang: str, key: str, **kwargs) -> str:
+    lang = lang if lang in PLAYER_MSGS else "en"
+    return PLAYER_MSGS[lang][key].format(**kwargs)
+
 
 def is_event_admin():
     async def predicate(interaction: discord.Interaction) -> bool:
@@ -43,7 +84,7 @@ def parse_event_dt(date_str: str, time_str: str) -> datetime.datetime:
 def format_event_dt(iso_str: str) -> str:
     try:
         dt = datetime.datetime.fromisoformat(iso_str)
-        return dt.strftime("%d.%m.%Y в %H:%M")
+        return dt.strftime("%d.%m.%Y %H:%M")
     except (ValueError, TypeError):
         return iso_str or "—"
 
@@ -53,27 +94,27 @@ def build_event_embed(event: dict, joined: int, waiting: int) -> discord.Embed:
     status = event.get("status", "active")
     if status == "closed":
         state = "closed"
-        state_label = "🔒 Набор закрыт"
+        state_label = "🔒 Closed"
     elif joined >= capacity:
         state = "full"
-        state_label = "🟠 Мест нет"
+        state_label = "🟠 Full"
     else:
         state = "open"
-        state_label = "🟢 Идёт набор"
+        state_label = "🟢 Open for signup"
 
     embed = discord.Embed(
         title=f"🎫 {event['title']}",
         description=event.get("description") or "",
         color=STATUS_COLORS[state],
     )
-    embed.add_field(name="🗓️ Дата и время", value=format_event_dt(event["event_dt"]), inline=False)
-    embed.add_field(name="👥 Участники", value=f"{joined}/{capacity}", inline=True)
-    embed.add_field(name="📌 Статус", value=state_label, inline=True)
+    embed.add_field(name="🗓️ Date & Time", value=format_event_dt(event["event_dt"]), inline=False)
+    embed.add_field(name="👥 Participants", value=f"{joined}/{capacity}", inline=True)
+    embed.add_field(name="📌 Status", value=state_label, inline=True)
     if waiting:
-        embed.add_field(name="⏳ Лист ожидания", value=str(waiting), inline=True)
+        embed.add_field(name="⏳ Waitlist", value=str(waiting), inline=True)
     if event.get("role_id"):
-        embed.add_field(name="🔑 Роль участника", value=f"<@&{event['role_id']}>", inline=False)
-    embed.set_footer(text=f"Событие #{event['id']}")
+        embed.add_field(name="🔑 Role", value=f"<@&{event['role_id']}>", inline=False)
+    embed.set_footer(text=f"Event #{event['id']}")
     return embed
 
 
@@ -85,7 +126,7 @@ class EventCardView(discord.ui.View):
         self.event_id = event_id
 
         join_btn = discord.ui.Button(
-            label="Записаться",
+            label="Join",
             emoji="✅",
             style=discord.ButtonStyle.success,
             custom_id=f"event_join:{event_id}",
@@ -94,7 +135,7 @@ class EventCardView(discord.ui.View):
         self.add_item(join_btn)
 
         leave_btn = discord.ui.Button(
-            label="Отменить запись",
+            label="Leave",
             emoji="🚪",
             style=discord.ButtonStyle.secondary,
             custom_id=f"event_leave:{event_id}",
@@ -198,8 +239,8 @@ class EventsCog(commands.Cog, name="EventsCog"):
         await self.bot.db.set_event_message(event_id, private_channel.id, announce_channel.id, card_msg.id)
 
         await private_channel.send(
-            f"🎫 Приватный канал события **{title}**.\n"
-            f"Здесь будут появляться записавшиеся участники."
+            f"🎫 Private channel for **{title}**.\n"
+            f"Everyone who signs up will show up here."
         )
         return event_id, private_channel
 
@@ -261,20 +302,21 @@ class EventsCog(commands.Cog, name="EventsCog"):
     # ------------------------------------------------------------------
 
     async def handle_join(self, interaction: discord.Interaction, event_id: int):
+        lang = await self.bot.db.get_user_lang(interaction.user.id)
         event = await self.bot.db.get_event(event_id)
         if not event:
-            await interaction.response.send_message("Это событие больше не существует.", ephemeral=True)
+            await interaction.response.send_message(pm(lang, "event_gone"), ephemeral=True)
             return
         if event["status"] != "active":
-            await interaction.response.send_message("Набор на это событие закрыт.", ephemeral=True)
+            await interaction.response.send_message(pm(lang, "signup_closed"), ephemeral=True)
             return
 
         existing = await self.bot.db.get_participant(event_id, interaction.user.id)
         if existing and existing["status"] == "joined":
-            await interaction.response.send_message("Ты уже записан(а) на это событие ✅", ephemeral=True)
+            await interaction.response.send_message(pm(lang, "already_joined"), ephemeral=True)
             return
         if existing and existing["status"] == "waiting":
-            await interaction.response.send_message("Ты уже в листе ожидания на это событие ⏳", ephemeral=True)
+            await interaction.response.send_message(pm(lang, "already_waiting"), ephemeral=True)
             return
 
         joined_count = await self.bot.db.count_participants(event_id, "joined")
@@ -283,39 +325,37 @@ class EventsCog(commands.Cog, name="EventsCog"):
             await self._grant_access(interaction.guild, event, interaction.user)
             await self.refresh_card(event_id)
             channel = interaction.guild.get_channel(event["channel_id"])
-            mention = channel.mention if channel else "приватном канале"
+            mention = channel.mention if channel else pm(lang, "private_channel_fallback")
             await interaction.response.send_message(
-                f"✅ Записал(а) тебя на «{event['title']}». Доступ к {mention} открыт.",
-                ephemeral=True,
+                pm(lang, "joined", title=event["title"], channel=mention), ephemeral=True,
             )
         else:
             await self.bot.db.add_participant(event_id, interaction.user.id, "waiting")
             waiting_pos = await self.bot.db.count_participants(event_id, "waiting")
             await self.refresh_card(event_id)
             await interaction.response.send_message(
-                f"⏳ Мест нет — ты добавлен(а) в лист ожидания (позиция {waiting_pos}). "
-                f"Организатор может одобрить тебя из листа ожидания, если появятся места.",
-                ephemeral=True,
+                pm(lang, "waitlisted", pos=waiting_pos), ephemeral=True,
             )
 
     async def handle_leave(self, interaction: discord.Interaction, event_id: int):
+        lang = await self.bot.db.get_user_lang(interaction.user.id)
         event = await self.bot.db.get_event(event_id)
         if not event:
-            await interaction.response.send_message("Это событие больше не существует.", ephemeral=True)
+            await interaction.response.send_message(pm(lang, "event_gone"), ephemeral=True)
             return
 
         existing = await self.bot.db.get_participant(event_id, interaction.user.id)
         if not existing:
-            await interaction.response.send_message("Ты не записан(а) на это событие.", ephemeral=True)
+            await interaction.response.send_message(pm(lang, "not_signed_up"), ephemeral=True)
             return
 
         was_joined = existing["status"] == "joined"
         await self.bot.db.remove_participant(event_id, interaction.user.id)
         if was_joined:
             await self._revoke_access(interaction.guild, event, interaction.user)
-            msg = "🚪 Запись отменена, доступ к приватному каналу и роль сняты."
+            msg = pm(lang, "left_joined")
         else:
-            msg = "🚪 Ты вышел(а) из листа ожидания."
+            msg = pm(lang, "left_waiting")
         await self.refresh_card(event_id)
         await interaction.response.send_message(msg, ephemeral=True)
 
@@ -347,7 +387,8 @@ class EventsCog(commands.Cog, name="EventsCog"):
                     member, view_channel=True, send_messages=True, read_message_history=True,
                     reason=f"Запись на событие #{event['id']}",
                 )
-                await channel.send(f"👋 {member.mention} присоединился(ась) к событию!")
+                lang = await self.bot.db.get_user_lang(member.id)
+                await channel.send(pm(lang, "welcome", mention=member.mention))
             except discord.HTTPException:
                 log.warning("Не удалось дать доступ к каналу %s участнику %s", channel.id, member.id)
 
