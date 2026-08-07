@@ -23,12 +23,11 @@ STATUS_COLORS = {
 PLAYER_MSGS = {
     "en": {
         "event_gone": "This event no longer exists.",
-        "signup_closed": "Signups for this event are closed.",
         "already_joined": "You're already signed up for this event ✅",
         "already_waiting": "You're already on the waitlist for this event ⏳",
         "joined": "✅ You're signed up for **{title}**. Access to {channel} is now open.",
-        "waitlisted": "⏳ No spots left — you've been added to the waitlist (position {pos}). "
-                       "The organizer can approve you from the waitlist if a spot opens up.",
+        "waitlisted": "⏳ You've been added to the waitlist (position {pos}). "
+                       "The organizer reviews waitlist requests manually and will approve you if a spot opens up.",
         "not_signed_up": "You're not signed up for this event.",
         "left_joined": "🚪 Signup cancelled — your role and channel access were removed.",
         "left_waiting": "🚪 You left the waitlist.",
@@ -37,12 +36,11 @@ PLAYER_MSGS = {
     },
     "ru": {
         "event_gone": "Это событие больше не существует.",
-        "signup_closed": "Набор на это событие закрыт.",
         "already_joined": "Ты уже записан(а) на это событие ✅",
         "already_waiting": "Ты уже в листе ожидания на это событие ⏳",
         "joined": "✅ Записал(а) тебя на «{title}». Доступ к {channel} открыт.",
-        "waitlisted": "⏳ Мест нет — ты добавлен(а) в лист ожидания (позиция {pos}). "
-                       "Организатор может одобрить тебя из листа ожидания, если появятся места.",
+        "waitlisted": "⏳ Ты добавлен(а) в лист ожидания (позиция {pos}). "
+                       "Организатор разбирает заявки вручную и одобрит тебя, если появится место.",
         "not_signed_up": "Ты не записан(а) на это событие.",
         "left_joined": "🚪 Запись отменена, доступ к приватному каналу и роль сняты.",
         "left_waiting": "🚪 Ты вышел(а) из листа ожидания.",
@@ -93,14 +91,16 @@ def build_event_embed(event: dict, joined: int, waiting: int) -> discord.Embed:
     capacity = event["capacity"]
     status = event.get("status", "active")
     if status == "closed":
+        # Ручной режим: организатор не хочет, чтобы люди попадали сразу,
+        # даже если формально есть свободные места — все заявки идут в очередь.
         state = "closed"
-        state_label = "🔒 Closed"
+        state_label = "🔒 Manual approval (applications go to waitlist)"
     elif joined >= capacity:
         state = "full"
-        state_label = "🟠 Full"
+        state_label = "🟠 Full — new signups go to waitlist"
     else:
         state = "open"
-        state_label = "🟢 Open for signup"
+        state_label = "🟢 Open — instant signup"
 
     embed = discord.Embed(
         title=f"🎫 {event['title']}",
@@ -260,7 +260,7 @@ class EventsCog(commands.Cog, name="EventsCog"):
             )
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-    @event_group.command(name="close", description="Закрыть набор участников на событие")
+    @event_group.command(name="close", description="Перевести набор в ручной режим — новые заявки идут в лист ожидания")
     @is_event_admin()
     async def close_event(self, interaction: discord.Interaction, event_id: int):
         event = await self.bot.db.get_event(event_id)
@@ -269,7 +269,11 @@ class EventsCog(commands.Cog, name="EventsCog"):
             return
         await self.bot.db.set_event_status(event_id, "closed")
         await self.refresh_card(event_id)
-        await interaction.response.send_message(f"🔒 Набор на событие `#{event_id}` закрыт.", ephemeral=True)
+        await interaction.response.send_message(
+            f"🔒 Событие `#{event_id}` переведено в ручной режим: новые заявки будут падать "
+            f"в лист ожидания, даже если формально есть места. Одобряй вручную через веб-панель.",
+            ephemeral=True,
+        )
 
     @event_group.command(name="delete", description="Удалить событие вместе с приватным каналом")
     @is_event_admin()
@@ -307,9 +311,6 @@ class EventsCog(commands.Cog, name="EventsCog"):
         if not event:
             await interaction.response.send_message(pm(lang, "event_gone"), ephemeral=True)
             return
-        if event["status"] != "active":
-            await interaction.response.send_message(pm(lang, "signup_closed"), ephemeral=True)
-            return
 
         existing = await self.bot.db.get_participant(event_id, interaction.user.id)
         if existing and existing["status"] == "joined":
@@ -320,7 +321,10 @@ class EventsCog(commands.Cog, name="EventsCog"):
             return
 
         joined_count = await self.bot.db.count_participants(event_id, "joined")
-        if joined_count < event["capacity"]:
+        # Мгновенная запись только если набор в обычном режиме (не "закрыт" вручную)
+        # И есть свободные места. Иначе — в лист ожидания, организатор одобряет сам.
+        instant = (event["status"] == "active") and (joined_count < event["capacity"])
+        if instant:
             await self.bot.db.add_participant(event_id, interaction.user.id, "joined")
             await self._grant_access(interaction.guild, event, interaction.user)
             await self.refresh_card(event_id)

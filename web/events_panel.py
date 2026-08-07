@@ -186,9 +186,20 @@ def _display_name(bot, user_id: int) -> str:
 
 
 STATUS_LABELS = {
-    "active": "🟢 активно",
-    "closed": "🔒 закрыто",
+    "active": "🟢 обычный (авто-запись)",
+    "closed": "🔒 ручной (заявки в очередь)",
 }
+
+
+def _format_ts(iso_str: str) -> str:
+    if not iso_str:
+        return "—"
+    try:
+        import datetime
+        dt = datetime.datetime.fromisoformat(iso_str)
+        return dt.strftime("%d.%m.%Y %H:%M")
+    except ValueError:
+        return iso_str
 
 
 async def events_list(request: web.Request):
@@ -247,7 +258,7 @@ def _participant_rows(bot, guild, participants, event_id, action_prefix, status)
                 f"<form method='post' action='/events/{event_id}/participants/{p['user_id']}/remove' style='display:inline'>"
                 f"<button class='danger' type='submit'>Убрать</button></form>"
             )
-        rows.append(f"<tr><td>{name}</td><td>{p['joined_at'] or ''}</td><td>{actions}</td></tr>")
+        rows.append(f"<tr><td>{name}</td><td>{_format_ts(p['joined_at'])}</td><td>{actions}</td></tr>")
     return "".join(rows) or "<tr><td colspan='3' class='muted'>Пусто.</td></tr>"
 
 
@@ -324,6 +335,23 @@ async def event_detail(request: web.Request):
     </div>
 
     <div class="card">
+      <h3>Режим приёма заявок</h3>
+      <p class="muted">
+        <b>🟢 Обычный</b> — пока есть свободные места, «Join» в Discord сразу даёт доступ.
+        Когда лимит достигнут — новые заявки сами падают в лист ожидания ниже.<br>
+        <b>🔒 Ручной</b> — вообще все, кто жмёт «Join», попадают в лист ожидания,
+        даже если по факту есть свободные места (например, после того как ты увеличил лимит,
+        но ещё не готов зачислять всех подряд). Ты сам одобряешь по одному, в любом порядке.
+      </p>
+      <p>Сейчас: <span class="pill">{STATUS_LABELS.get(event['status'], event['status'])}</span></p>
+      <form method="post" action="/events/{event_id}/{'reopen' if event['status'] == 'closed' else 'close'}">
+        <button class="secondary" type="submit">
+          {'🟢 Переключить на обычный режим' if event['status'] == 'closed' else '🔒 Переключить на ручной режим'}
+        </button>
+      </form>
+    </div>
+
+    <div class="card">
       <h3>Участники ({len(joined)}/{event['capacity']})</h3>
       <table>
         <tr><th>Пользователь</th><th>Записался</th><th></th></tr>
@@ -334,18 +362,17 @@ async def event_detail(request: web.Request):
 
     <div class="card">
       <h3>Лист ожидания ({len(waiting)})</h3>
+      <p class="muted">Отсортирован по времени подачи заявки — кто раньше подал, тот выше в списке.</p>
       <table>
-        <tr><th>Пользователь</th><th>Записался</th><th></th></tr>
+        <tr><th>Пользователь</th><th>Подал заявку</th><th></th></tr>
         {_participant_rows(bot, guild, waiting, event_id, "waitlist", "waiting")}
       </table>
-      <p class="muted">Одобрить можно, только если в событии ещё есть свободные места — сперва донаберите места выше, если нужно.</p>
+      <p class="muted">«Одобрить» сработает, только если в событии есть свободное место
+      (joined &lt; лимита) — при необходимости сначала подними лимит в форме выше.</p>
     </div>
 
     <div class="card">
       <h3>Опасная зона</h3>
-      <form method="post" action="/events/{event_id}/{'reopen' if event['status'] == 'closed' else 'close'}" style="display:inline">
-        <button class="secondary" type="submit">{'Открыть набор снова' if event['status'] == 'closed' else 'Закрыть набор'}</button>
-      </form>
       <form method="post" action="/events/{event_id}/delete" style="display:inline"
             onsubmit="return confirm('Удалить событие и приватный канал безвозвратно?')">
         <button class="danger" type="submit">Удалить событие</button>
