@@ -433,18 +433,10 @@ class EventsCog(commands.Cog, name="EventsCog"):
             pass
 
     async def _teardown_event(self, event: dict, guild: discord.Guild):
-        # снять роль со всех участников и удалить приватный канал, потом запись из БД
-        participants = await self.bot.db.list_participants(event["id"], "joined")
-        if event.get("role_id"):
-            role = guild.get_role(event["role_id"])
-            if role:
-                for p in participants:
-                    member = await self._resolve_member(guild, p["user_id"])
-                    if member:
-                        try:
-                            await member.remove_roles(role, reason=f"Событие #{event['id']} удалено/закрыто")
-                        except discord.HTTPException:
-                            pass
+        # Роль у участников больше НЕ снимаем — она остаётся как память/бейдж
+        # о том, что человек был на этом событии. Снимаем только приватный
+        # канал и помечаем карточку. Роль по-прежнему снимается, если человек
+        # сам выходит из записи до завершения события (см. leave-flow выше).
         if event.get("channel_id"):
             channel = guild.get_channel(event["channel_id"])
             if channel:
