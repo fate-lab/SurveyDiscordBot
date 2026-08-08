@@ -169,14 +169,50 @@ async def logout(request: web.Request):
 LANG_NAMES = {"ru": "🇷🇺 Русский", "en": "🇬🇧 English"}
 
 
+def _field_has(value, lang) -> bool:
+    if isinstance(value, dict):
+        return bool(str(value.get(lang) or "").strip())
+    # старый одноязычный опрос — считаем, что заполнен на его "родном" lang
+    return bool(str(value or "").strip())
+
+
+def lang_badge(survey: dict) -> str:
+    """Показывает, на каких языках реально есть контент (заголовок опроса),
+    а не формальное поле 'lang', которое раньше значило 'единственный язык'."""
+    title = survey.get("title")
+    if isinstance(title, dict):
+        ru_ok, en_ok = _field_has(title, "ru"), _field_has(title, "en")
+    else:
+        # Старый формат: единственный язык хранился в отдельной колонке lang
+        old_lang = survey.get("lang") or DEFAULT_LANG
+        ru_ok, en_ok = old_lang == "ru", old_lang == "en"
+    if ru_ok and en_ok:
+        return "🇷🇺 + 🇬🇧"
+    if ru_ok:
+        return "🇷🇺 только"
+    if en_ok:
+        return "🇬🇧 only"
+    return "—"
+
+
+def title_str(survey: dict) -> str:
+    title = survey.get("title")
+    if isinstance(title, dict):
+        ru, en = title.get("ru") or "", title.get("en") or ""
+        if ru and en and ru != en:
+            return f"{ru} / {en}"
+        return ru or en
+    return title or ""
+
+
 async def surveys_list(request: web.Request):
     bot = request.app["bot"]
     surveys = await bot.db.list_surveys()
     rows = "".join(
         f"<tr><td><a href='/surveys/{html.escape(s['name'])}'>{html.escape(s['name'])}</a></td>"
-        f"<td>{html.escape(s['title'] or '')}</td>"
+        f"<td>{html.escape(title_str(s))}</td>"
         f"<td>{s['question_count']}</td>"
-        f"<td>{html.escape(LANG_NAMES.get(s['lang'], s['lang']))}</td></tr>"
+        f"<td>{lang_badge(s)}</td></tr>"
         for s in surveys
     )
     if not rows:
@@ -200,6 +236,10 @@ async def surveys_list(request: web.Request):
 
 QUESTION_TYPES = list(sorted(ALLOWED_TYPES))
 
+# Каждое текстовое поле вопроса теперь вводится в двух колонках — 🇷🇺 и 🇬🇧.
+# Можно заполнить только один язык (второй возьмётся автоматически как
+# запасной при прохождении опроса), поэтому required тут не ставим — валидация
+# "хотя бы один язык" делается на сервере в validate_questions().
 FORM_JS = r"""
 let qCount = 0;
 function addQuestion(prefill) {
@@ -217,9 +257,15 @@ function addQuestion(prefill) {
           __TYPE_OPTIONS__
         </select>
       </div>
+    </div>
+    <div class="row">
       <div>
-        <label>Текст вопроса</label>
-        <input type="text" class="q-text" required>
+        <label>🇷🇺 Текст вопроса</label>
+        <input type="text" class="q-text-ru">
+      </div>
+      <div>
+        <label>🇬🇧 Question text</label>
+        <input type="text" class="q-text-en">
       </div>
     </div>
 
@@ -236,35 +282,73 @@ function addQuestion(prefill) {
       </div>
       <div class="row">
         <div>
-          <label>Подпись у минимума (необязательно)</label>
-          <input type="text" class="q-min-label" placeholder="например: плохо">
+          <label>🇷🇺 Подпись у минимума (необязательно)</label>
+          <input type="text" class="q-min-label-ru" placeholder="например: плохо">
         </div>
         <div>
-          <label>Подпись у максимума (необязательно)</label>
-          <input type="text" class="q-max-label" placeholder="например: отлично">
+          <label>🇬🇧 Min label (optional)</label>
+          <input type="text" class="q-min-label-en" placeholder="e.g. bad">
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>🇷🇺 Подпись у максимума (необязательно)</label>
+          <input type="text" class="q-max-label-ru" placeholder="например: отлично">
+        </div>
+        <div>
+          <label>🇬🇧 Max label (optional)</label>
+          <input type="text" class="q-max-label-en" placeholder="e.g. great">
         </div>
       </div>
     </div>
 
     <div class="q-options-wrap" style="display:none">
-      <label>Варианты ответа (по одному на строку)</label>
-      <textarea class="q-options" rows="3"></textarea>
+      <div class="row">
+        <div>
+          <label>🇷🇺 Варианты ответа (по одному на строку)</label>
+          <textarea class="q-options-ru" rows="3"></textarea>
+        </div>
+        <div>
+          <label>🇬🇧 Options (one per line)</label>
+          <textarea class="q-options-en" rows="3"></textarea>
+        </div>
+      </div>
+      <p class="muted" style="margin-top:-6px">Важно: количество строк и их порядок должны
+      совпадать в обеих колонках — это перевод одних и тех же вариантов, а не разные списки.</p>
       <label><input type="checkbox" class="q-other" style="width:auto" onchange="onOtherToggle(this)"> Добавить вариант "Другое" / "Other"</label>
       <div class="q-other-label-wrap" style="display:none">
-        <label>Своя подпись для этого варианта (необязательно — иначе возьмётся "Другое"/"Other" по языку опроса)</label>
-        <input type="text" class="q-other-label" placeholder="например: Свой вариант">
+        <div class="row">
+          <div>
+            <label>🇷🇺 Своя подпись (необязательно, иначе "Другое")</label>
+            <input type="text" class="q-other-label-ru" placeholder="например: Свой вариант">
+          </div>
+          <div>
+            <label>🇬🇧 Custom label (optional, else "Other")</label>
+            <input type="text" class="q-other-label-en" placeholder="e.g. My own answer">
+          </div>
+        </div>
       </div>
     </div>
 
     <div class="q-yesno-wrap" style="display:none">
       <div class="row">
         <div>
-          <label>Подпись на кнопке "Да" (необязательно)</label>
-          <input type="text" class="q-yes-label" placeholder="Да / Yes">
+          <label>🇷🇺 Подпись на кнопке "Да" (необязательно)</label>
+          <input type="text" class="q-yes-label-ru" placeholder="Да">
         </div>
         <div>
-          <label>Подпись на кнопке "Нет" (необязательно)</label>
-          <input type="text" class="q-no-label" placeholder="Нет / No">
+          <label>🇬🇧 "Yes" button label (optional)</label>
+          <input type="text" class="q-yes-label-en" placeholder="Yes">
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>🇷🇺 Подпись на кнопке "Нет" (необязательно)</label>
+          <input type="text" class="q-no-label-ru" placeholder="Нет">
+        </div>
+        <div>
+          <label>🇬🇧 "No" button label (optional)</label>
+          <input type="text" class="q-no-label-en" placeholder="No">
         </div>
       </div>
     </div>
@@ -274,22 +358,38 @@ function addQuestion(prefill) {
     </div>`;
   wrap.appendChild(div);
 
-  // применяем prefill (используется при редактировании существующего опроса)
+  // применяем prefill (используется при редактировании существующего опроса).
+  // Поля могут прийти как строка (старый одноязычный опрос) или объект {ru,en}.
+  const asObj = (v) => (v && typeof v === 'object') ? v : { ru: v || '', en: '' };
+  const set = (sel, val) => { const el = div.querySelector(sel); if (el && val) el.value = val; };
+
   const typeSel = div.querySelector('.q-type');
   if (prefill.type) typeSel.value = prefill.type;
-  if (prefill.text) div.querySelector('.q-text').value = prefill.text;
-  if (prefill.options) div.querySelector('.q-options').value = prefill.options.join('\n');
+  const text = asObj(prefill.text);
+  set('.q-text-ru', text.ru); set('.q-text-en', text.en);
+
+  if (prefill.options) {
+    const opts = asObj(prefill.options);
+    if (Array.isArray(opts)) { set('.q-options-ru', opts.join('\n')); }
+    else {
+      set('.q-options-ru', (opts.ru || []).join('\n'));
+      set('.q-options-en', (opts.en || []).join('\n'));
+    }
+  }
   if (prefill.other_option) {
     div.querySelector('.q-other').checked = true;
     div.querySelector('.q-other-label-wrap').style.display = '';
   }
-  if (prefill.other_label) div.querySelector('.q-other-label').value = prefill.other_label;
+  if (prefill.other_label) {
+    const ol = asObj(prefill.other_label);
+    set('.q-other-label-ru', ol.ru); set('.q-other-label-en', ol.en);
+  }
   if (prefill.min !== undefined) div.querySelector('.q-min').value = prefill.min;
   if (prefill.max !== undefined) div.querySelector('.q-max').value = prefill.max;
-  if (prefill.min_label) div.querySelector('.q-min-label').value = prefill.min_label;
-  if (prefill.max_label) div.querySelector('.q-max-label').value = prefill.max_label;
-  if (prefill.yes_label) div.querySelector('.q-yes-label').value = prefill.yes_label;
-  if (prefill.no_label) div.querySelector('.q-no-label').value = prefill.no_label;
+  if (prefill.min_label) { const l = asObj(prefill.min_label); set('.q-min-label-ru', l.ru); set('.q-min-label-en', l.en); }
+  if (prefill.max_label) { const l = asObj(prefill.max_label); set('.q-max-label-ru', l.ru); set('.q-max-label-en', l.en); }
+  if (prefill.yes_label) { const l = asObj(prefill.yes_label); set('.q-yes-label-ru', l.ru); set('.q-yes-label-en', l.en); }
+  if (prefill.no_label) { const l = asObj(prefill.no_label); set('.q-no-label-ru', l.ru); set('.q-no-label-en', l.en); }
   onTypeChange(typeSel);
 }
 function onTypeChange(select) {
@@ -303,35 +403,44 @@ function onOtherToggle(checkbox) {
   const wrap = checkbox.closest('.q-options-wrap').querySelector('.q-other-label-wrap');
   wrap.style.display = checkbox.checked ? '' : 'none';
 }
+function bilingual(b, ruSel, enSel) {
+  const ru = (b.querySelector(ruSel).value || '').trim();
+  const en = (b.querySelector(enSel).value || '').trim();
+  return { ru, en };
+}
+function bilingualOrUndefined(b, ruSel, enSel) {
+  const v = bilingual(b, ruSel, enSel);
+  return (v.ru || v.en) ? v : undefined;
+}
 function collectQuestions() {
   const blocks = document.querySelectorAll('.q-block');
   const questions = [];
   blocks.forEach(b => {
     const type = b.querySelector('.q-type').value;
-    const text = b.querySelector('.q-text').value.trim();
-    if (!text) return;
+    const text = bilingual(b, '.q-text-ru', '.q-text-en');
+    if (!text.ru && !text.en) return;
     const q = { type, text };
     if (type === 'single' || type === 'multi') {
-      const opts = b.querySelector('.q-options').value
-        .split('\n').map(s => s.trim()).filter(Boolean);
-      q.options = opts;
+      const optsRu = b.querySelector('.q-options-ru').value.split('\n').map(s => s.trim()).filter(Boolean);
+      const optsEn = b.querySelector('.q-options-en').value.split('\n').map(s => s.trim()).filter(Boolean);
+      q.options = { ru: optsRu, en: optsEn };
       if (b.querySelector('.q-other').checked) {
         q.other_option = true;
-        const otherLabel = b.querySelector('.q-other-label').value.trim();
+        const otherLabel = bilingualOrUndefined(b, '.q-other-label-ru', '.q-other-label-en');
         if (otherLabel) q.other_label = otherLabel;
       }
     }
     if (type === 'scale') {
       q.min = parseInt(b.querySelector('.q-min').value || '1', 10);
       q.max = parseInt(b.querySelector('.q-max').value || '5', 10);
-      const minLabel = b.querySelector('.q-min-label').value.trim();
-      const maxLabel = b.querySelector('.q-max-label').value.trim();
+      const minLabel = bilingualOrUndefined(b, '.q-min-label-ru', '.q-min-label-en');
+      const maxLabel = bilingualOrUndefined(b, '.q-max-label-ru', '.q-max-label-en');
       if (minLabel) q.min_label = minLabel;
       if (maxLabel) q.max_label = maxLabel;
     }
     if (type === 'yes_no_detail') {
-      const yesLabel = b.querySelector('.q-yes-label').value.trim();
-      const noLabel = b.querySelector('.q-no-label').value.trim();
+      const yesLabel = bilingualOrUndefined(b, '.q-yes-label-ru', '.q-yes-label-en');
+      const noLabel = bilingualOrUndefined(b, '.q-no-label-ru', '.q-no-label-en');
       if (yesLabel) q.yes_label = yesLabel;
       if (noLabel) q.no_label = noLabel;
     }
@@ -342,7 +451,7 @@ function collectQuestions() {
 function onSubmitForm(e) {
   const questions = collectQuestions();
   if (questions.length === 0) {
-    alert('Добавьте хотя бы один вопрос');
+    alert('Добавьте хотя бы один вопрос (текст хотя бы на одном языке)');
     e.preventDefault();
     return false;
   }
@@ -352,35 +461,54 @@ function onSubmitForm(e) {
 """
 
 
+def _bilingual_of(value) -> dict:
+    """Приводит title/intro/outro (строка или {ru,en}) к словарю для формы."""
+    if isinstance(value, dict):
+        return {"ru": value.get("ru") or "", "en": value.get("en") or ""}
+    return {"ru": value or "", "en": ""}
+
+
 def _survey_form_body(*, action_url: str, submit_label: str, error: str = "",
                        prefill_questions_json: str = "[]",
                        name_value: str = "", name_readonly: bool = False,
-                       title_value: str = "", intro_value: str = "", outro_value: str = "",
-                       anonymous_checked: bool = True, allow_multiple_checked: bool = False,
-                       lang_value: str = DEFAULT_LANG) -> str:
+                       title_value=None, intro_value=None, outro_value=None,
+                       anonymous_checked: bool = True, allow_multiple_checked: bool = False) -> str:
     error_html = f"<p class='error'>{html.escape(error)}</p>" if error else ""
     type_options = "".join(f'<option value="{qt}">{qt}</option>' for qt in QUESTION_TYPES)
-    lang_options = "".join(
-        f'<option value="{code}"{" selected" if code == lang_value else ""}>{html.escape(name)}</option>'
-        for code, name in LANG_NAMES.items()
-    )
     name_attr = 'readonly style="opacity:0.7"' if name_readonly else 'pattern="[A-Za-z0-9_\\-]+"'
     js = FORM_JS.replace("__TYPE_OPTIONS__", type_options)
+    title = _bilingual_of(title_value)
+    intro = _bilingual_of(intro_value)
+    outro = _bilingual_of(outro_value)
     return f"""
     <div class="card">
       <h2>{submit_label}</h2>
       {error_html}
+      <p class="muted">Опрос двуязычный: заполни колонку 🇷🇺 и/или 🇬🇧 для каждого поля.
+      Кто проходит опрос — увидит текст на своём языке (выбранном в Discord);
+      если для его языка перевод не заполнен, покажется второй язык.</p>
       <form method="post" action="{action_url}" onsubmit="return onSubmitForm(event)">
         <label>Короткое имя (латиницей, без пробелов, используется в URL)</label>
         <input type="text" name="name" value="{html.escape(name_value)}" {name_attr} required>
-        <label>Язык опроса (тексты кнопок/подсказок для проходящего)</label>
-        <select name="lang">{lang_options}</select>
+
         <label>Заголовок опроса</label>
-        <input type="text" name="title" value="{html.escape(title_value)}" required>
+        <div class="row">
+          <div><label class="muted">🇷🇺 RU</label><input type="text" name="title_ru" value="{html.escape(title['ru'])}"></div>
+          <div><label class="muted">🇬🇧 EN</label><input type="text" name="title_en" value="{html.escape(title['en'])}"></div>
+        </div>
+
         <label>Вступительный текст (необязательно)</label>
-        <textarea name="intro" rows="2">{html.escape(intro_value)}</textarea>
+        <div class="row">
+          <div><label class="muted">🇷🇺 RU</label><textarea name="intro_ru" rows="2">{html.escape(intro['ru'])}</textarea></div>
+          <div><label class="muted">🇬🇧 EN</label><textarea name="intro_en" rows="2">{html.escape(intro['en'])}</textarea></div>
+        </div>
+
         <label>Текст после завершения (необязательно)</label>
-        <textarea name="outro" rows="2">{html.escape(outro_value)}</textarea>
+        <div class="row">
+          <div><label class="muted">🇷🇺 RU</label><textarea name="outro_ru" rows="2">{html.escape(outro['ru'])}</textarea></div>
+          <div><label class="muted">🇬🇧 EN</label><textarea name="outro_en" rows="2">{html.escape(outro['en'])}</textarea></div>
+        </div>
+
         <div class="row">
           <label><input type="checkbox" name="anonymous" {"checked" if anonymous_checked else ""} style="width:auto"> Анонимный опрос</label>
           <label><input type="checkbox" name="allow_multiple" {"checked" if allow_multiple_checked else ""} style="width:auto"> Разрешить проходить повторно</label>
@@ -414,18 +542,23 @@ async def survey_new_get(request: web.Request):
     return web.Response(text=page("Новый опрос", body), content_type="text/html")
 
 
+def _bilingual_from_form(data, base_name: str) -> dict:
+    ru = str(data.get(f"{base_name}_ru", "")).strip()
+    en = str(data.get(f"{base_name}_en", "")).strip()
+    return {"ru": ru, "en": en}
+
+
 async def survey_new_post(request: web.Request):
     bot = request.app["bot"]
     data = await request.post()
     name = str(data.get("name", "")).strip()
-    title = str(data.get("title", "")).strip() or name
-    intro = str(data.get("intro", "")).strip()
-    outro = str(data.get("outro", "")).strip()
+    title = _bilingual_from_form(data, "title")
+    if not title["ru"] and not title["en"]:
+        title = {"ru": name, "en": ""}
+    intro = _bilingual_from_form(data, "intro")
+    outro = _bilingual_from_form(data, "outro")
     anonymous = "anonymous" in data
     allow_multiple = "allow_multiple" in data
-    lang = str(data.get("lang", DEFAULT_LANG)).strip()
-    if lang not in SUPPORTED_LANGS:
-        lang = DEFAULT_LANG
 
     def fail(msg):
         return web.HTTPFound(f"/surveys/new?error={msg}")
@@ -443,7 +576,7 @@ async def survey_new_post(request: web.Request):
     await bot.db.create_survey(
         name=name, title=title, intro=intro, outro=outro,
         questions=questions, anonymous=anonymous, allow_multiple=allow_multiple,
-        creator_id=None, lang=lang,
+        creator_id=None, lang=DEFAULT_LANG,
     )
     return web.HTTPFound(f"/surveys/{name}")
 
@@ -459,10 +592,9 @@ async def survey_edit_get(request: web.Request):
         action_url=f"/surveys/{name}/edit", submit_label="Сохранить изменения", error=error,
         prefill_questions_json=json.dumps(survey["questions"], ensure_ascii=False),
         name_value=name, name_readonly=True,
-        title_value=survey.get("title") or "", intro_value=survey.get("intro") or "",
-        outro_value=survey.get("outro") or "",
+        title_value=survey.get("title"), intro_value=survey.get("intro"),
+        outro_value=survey.get("outro"),
         anonymous_checked=survey["anonymous"], allow_multiple_checked=survey["allow_multiple"],
-        lang_value=survey.get("lang") or DEFAULT_LANG,
     )
     return web.Response(text=page(f"Редактирование: {name}", body), content_type="text/html")
 
@@ -473,14 +605,13 @@ async def survey_edit_post(request: web.Request):
     if not await bot.db.get_survey(name):
         raise web.HTTPNotFound(text="Опрос не найден")
     data = await request.post()
-    title = str(data.get("title", "")).strip() or name
-    intro = str(data.get("intro", "")).strip()
-    outro = str(data.get("outro", "")).strip()
+    title = _bilingual_from_form(data, "title")
+    if not title["ru"] and not title["en"]:
+        title = {"ru": name, "en": ""}
+    intro = _bilingual_from_form(data, "intro")
+    outro = _bilingual_from_form(data, "outro")
     anonymous = "anonymous" in data
     allow_multiple = "allow_multiple" in data
-    lang = str(data.get("lang", DEFAULT_LANG)).strip()
-    if lang not in SUPPORTED_LANGS:
-        lang = DEFAULT_LANG
 
     def fail(msg):
         return web.HTTPFound(f"/surveys/{name}/edit?error={msg}")
@@ -493,7 +624,7 @@ async def survey_edit_post(request: web.Request):
 
     await bot.db.update_survey(
         name=name, title=title, intro=intro, outro=outro,
-        questions=questions, anonymous=anonymous, allow_multiple=allow_multiple, lang=lang,
+        questions=questions, anonymous=anonymous, allow_multiple=allow_multiple, lang=DEFAULT_LANG,
     )
     return web.HTTPFound(f"/surveys/{name}")
 
@@ -551,7 +682,6 @@ async def survey_detail(request: web.Request):
         </details>
         """)
     responses_html = "".join(resp_blocks) or "<p class='muted'>Ответов пока нет.</p>"
-    lang = survey.get("lang") or DEFAULT_LANG
     publish_cmd = f"/survey publish name:{name}"
     cloned_notice = ""
     if request.query.get("cloned"):
@@ -568,9 +698,9 @@ async def survey_detail(request: web.Request):
     {cloned_notice}
     <div class="card">
       <div class="row" style="align-items:center;justify-content:space-between;">
-        <h2 style="margin:0">{html.escape(survey.get('title') or name)}
+        <h2 style="margin:0">{html.escape(title_str(survey))}
           <span class="pill">{len(responses)} прош{'ёл' if len(responses)==1 else 'ло'}</span>
-          <span class="pill">{html.escape(LANG_NAMES.get(lang, lang))}</span></h2>
+          <span class="pill">{lang_badge(survey)}</span></h2>
         <div class="row" style="flex:none;gap:8px">
           <a class="btn secondary" href="/surveys/{html.escape(name)}/edit">Редактировать</a>
           <form method="post" action="/surveys/{html.escape(name)}/clone">
@@ -590,7 +720,9 @@ async def survey_detail(request: web.Request):
     <div class="card">
       <h3>Пригласить людей пройти опрос</h3>
       <p class="muted">Зайди в нужный Discord-канал и выполни там эту команду —
-      бот опубликует кнопку "{html.escape(tr(lang, 'take_survey_button'))}":</p>
+      бот опубликует карточку сразу на двух языках (🇷🇺 + 🇬🇧) с кнопкой
+      "📋 Пройти опрос / Take survey". Каждый пройдёт опрос на своём личном
+      языке (выбранном в Discord), независимо от языка карточки:</p>
       <code class="copyline"><span id="publish-cmd">{html.escape(publish_cmd)}</span>
         <button type="button" onclick="copyText('publish-cmd', this)">Копировать</button></code>
     </div>

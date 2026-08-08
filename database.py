@@ -103,6 +103,25 @@ class Database:
                 f"ALTER TABLE surveys ADD COLUMN lang TEXT NOT NULL DEFAULT '{DEFAULT_LANG}'"
             )
 
+    @staticmethod
+    def _pack_text_field(value):
+        """title/intro/outro теперь могут быть либо обычной строкой (старые
+        одноязычные опросы), либо словарём {"ru": ..., "en": ...} (новые
+        двуязычные опросы из веб-панели) — сохраняем словарь как JSON."""
+        if isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=False)
+        return value
+
+    @staticmethod
+    def _unpack_text_field(value):
+        if not value:
+            return value
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return value
+        return parsed if isinstance(parsed, dict) else value
+
     async def create_survey(self, name, title, intro, outro, questions,
                              anonymous, allow_multiple, creator_id, lang=DEFAULT_LANG):
         await self._conn.execute(
@@ -111,7 +130,8 @@ class Database:
                 creator_id, created_at, lang)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                name, title, intro, outro,
+                name, self._pack_text_field(title), self._pack_text_field(intro),
+                self._pack_text_field(outro),
                 json.dumps(questions, ensure_ascii=False),
                 int(anonymous), int(allow_multiple), creator_id,
                 datetime.datetime.utcnow().isoformat(), lang,
@@ -125,7 +145,8 @@ class Database:
             """UPDATE surveys SET title=?, intro=?, outro=?, questions=?,
                anonymous=?, allow_multiple=?, lang=? WHERE name=?""",
             (
-                title, intro, outro, json.dumps(questions, ensure_ascii=False),
+                self._pack_text_field(title), self._pack_text_field(intro),
+                self._pack_text_field(outro), json.dumps(questions, ensure_ascii=False),
                 int(anonymous), int(allow_multiple), lang, name,
             ),
         )
@@ -142,6 +163,9 @@ class Database:
         data["anonymous"] = bool(data["anonymous"])
         data["allow_multiple"] = bool(data["allow_multiple"])
         data["lang"] = data.get("lang") or DEFAULT_LANG
+        data["title"] = self._unpack_text_field(data.get("title"))
+        data["intro"] = self._unpack_text_field(data.get("intro"))
+        data["outro"] = self._unpack_text_field(data.get("outro"))
         return data
 
     async def list_surveys(self):
@@ -153,7 +177,7 @@ class Database:
         for name, title, questions, lang in rows:
             result.append({
                 "name": name,
-                "title": title,
+                "title": self._unpack_text_field(title),
                 "question_count": len(json.loads(questions)),
                 "lang": lang or DEFAULT_LANG,
             })
@@ -341,6 +365,15 @@ class Database:
         cur = await self._conn.execute("SELECT lang FROM user_language WHERE user_id = ?", (user_id,))
         row = await cur.fetchone()
         return row[0] if row else "en"
+
+    async def get_user_lang_raw(self, user_id):
+        """Как get_user_lang, но возвращает None, если пользователь ещё ни разу
+        не выбирал язык (в отличие от get_user_lang, который в этом случае
+        молча подставляет 'en'). Нужно, чтобы понять, надо ли спросить язык
+        перед началом опроса."""
+        cur = await self._conn.execute("SELECT lang FROM user_language WHERE user_id = ?", (user_id,))
+        row = await cur.fetchone()
+        return row[0] if row else None
 
     async def set_user_lang(self, user_id, lang: str):
         await self._conn.execute(

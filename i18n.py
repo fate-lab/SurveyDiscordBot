@@ -76,3 +76,30 @@ def t(lang: str, key: str, **kwargs) -> str:
     lang = lang if lang in SUPPORTED_LANGS else DEFAULT_LANG
     text = STRINGS[lang].get(key, STRINGS[DEFAULT_LANG].get(key, key))
     return text.format(**kwargs) if kwargs else text
+
+
+def other_lang(lang: str) -> str:
+    return "en" if lang == "ru" else "ru"
+
+
+def loc(value, lang: str):
+    """Достаёт текст/список на нужном языке из поля опроса.
+
+    Поддерживает новый двуязычный формат {"ru": ..., "en": ...} (используется
+    веб-панелью при создании/редактировании опроса) и старый формат — просто
+    строка/список — для опросов, созданных до появления двух языков. Если для
+    выбранного языка ничего не заполнено, подставляет то, что есть на втором
+    языке, чтобы опрос не ломался, пока не заполнили перевод.
+    """
+    if isinstance(value, dict):
+        val = value.get(lang)
+        if val not in (None, "", []):
+            return val
+        return value.get(other_lang(lang)) or ("" if not isinstance(value.get(other_lang(lang)), list) else [])
+    return value
+
+
+def has_any_lang(value) -> bool:
+    if isinstance(value, dict):
+        return bool(value.get("ru")) or bool(value.get("en"))
+    return bool(value)

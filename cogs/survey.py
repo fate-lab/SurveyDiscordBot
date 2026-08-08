@@ -9,14 +9,26 @@ from discord.ext import commands
 
 import config
 from csv_export import build_csv_bytes
-from i18n import t, DEFAULT_LANG, SUPPORTED_LANGS
+from i18n import t, loc, has_any_lang, DEFAULT_LANG, SUPPORTED_LANGS
 
 log = logging.getLogger("survey-bot")
 
 ALLOWED_TYPES = {"scale", "single", "multi", "yes_no_detail", "text"}
 
 
+def _text_len(value) -> int:
+    """Длина текста для проверок/обрезки — работает и со строкой, и с {ru,en}."""
+    if isinstance(value, dict):
+        return max(len(str(value.get("ru") or "")), len(str(value.get("en") or "")))
+    return len(str(value or ""))
+
+
 def validate_questions(questions):
+    """Валидирует список вопросов. Каждое текстовое поле (text, options,
+    other_label, min_label/max_label, yes_label/no_label) может быть либо
+    обычной строкой/списком (старый одноязычный формат), либо словарём
+    {"ru": ..., "en": ...} (новый двуязычный формат из веб-панели). Хотя бы
+    один из двух языков должен быть заполнен — второй можно дописать позже."""
     if not isinstance(questions, list) or not questions:
         raise ValueError("Поле 'questions' должно быть непустым списком.")
     for i, q in enumerate(questions):
@@ -25,17 +37,38 @@ def validate_questions(questions):
                 f"Вопрос {i + 1}: неизвестный или отсутствующий 'type'. "
                 f"Допустимые типы: {', '.join(sorted(ALLOWED_TYPES))}"
             )
-        if "text" not in q or not str(q["text"]).strip():
-            raise ValueError(f"Вопрос {i + 1}: отсутствует 'text'")
-        if q["type"] in ("single", "multi") and not q.get("options"):
+        if "text" not in q or not has_any_lang(q["text"]):
+            raise ValueError(f"Вопрос {i + 1}: отсутствует 'text' (заполните хотя бы один язык)")
+        if q["type"] in ("single", "multi") and not has_any_lang(q.get("options")):
             raise ValueError(f"Вопрос {i + 1}: для типа '{q['type']}' нужен непустой список 'options'")
         if q["type"] == "scale":
             q.setdefault("min", 1)
             q.setdefault("max", 5)
         # other_label — необязательное переопределение подписи кнопки/пункта
-        # "Другое"/"Other" для конкретного вопроса (иначе берётся из lang опроса)
-        if "other_label" in q and not str(q["other_label"]).strip():
+        # "Другое"/"Other" для конкретного вопроса (иначе берётся из языка юзера)
+        if "other_label" in q and not has_any_lang(q["other_label"]):
             q.pop("other_label", None)
+
+
+def build_bilingual_embed(survey: dict, name: str) -> discord.Embed:
+    """Карточка-приглашение видят все сразу (это не личное сообщение), поэтому
+    вместо подбора языка под конкретного человека показываем сразу оба —
+    RU и EN, — а не только "язык опроса", как было раньше."""
+    title_ru = loc(survey.get("title") or name, "ru")
+    title_en = loc(survey.get("title") or name, "en")
+    if title_ru and title_en and title_ru != title_en:
+        title = f"{title_ru} / {title_en}"
+    else:
+        title = title_ru or title_en or name
+
+    intro_ru = loc(survey.get("intro"), "ru")
+    intro_en = loc(survey.get("intro"), "en")
+    parts = []
+    if intro_ru:
+        parts.append(f"🇷🇺 {intro_ru}")
+    if intro_en and intro_en != intro_ru:
+        parts.append(f"🇬🇧 {intro_en}")
+    return discord.Embed(title=title, description="\n\n".join(parts), color=discord.Color.blurple())
 
 
 def is_survey_admin():
@@ -65,10 +98,19 @@ class FreeTextModal(discord.ui.Modal):
         self.stop()
 
 
+BILINGUAL_TAKE_SURVEY_LABEL = "📋 Пройти опрос / Take survey"
+BILINGUAL_LANG_PROMPT = (
+    "🌐 Перед началом выбери язык опроса — это займёт секунду и запомнится "
+    "для всех следующих опросов.\n"
+    "🌐 Before we start, pick your language — takes a second and will be "
+    "remembered for future surveys."
+)
+
+
 class SurveyStartView(discord.ui.View):
     """Persistent view attached to the published survey message."""
 
-    def __init__(self, survey_name: str, label: str = "📋 Пройти опрос"):
+    def __init__(self, survey_name: str, label: str = BILINGUAL_TAKE_SURVEY_LABEL):
         super().__init__(timeout=None)
         self.survey_name = survey_name
         button = discord.ui.Button(
@@ -87,25 +129,60 @@ class SurveyStartView(discord.ui.View):
         await cog.begin_survey(interaction, self.survey_name)
 
 
+class SurveyLangPromptView(discord.ui.View):
+    """Показывается один раз тому, кто ещё ни разу не выбирал язык —
+    аналог настройки языка (как в /language setup), но прямо перед стартом
+    опроса, чтобы не заставлять сначала идти в отдельный канал."""
+
+    def __init__(self, cog, survey_name: str):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.survey_name = survey_name
+
+    @discord.ui.button(label="English", emoji="🇬🇧", style=discord.ButtonStyle.primary)
+    async def pick_en(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._pick(interaction, "en")
+
+    @discord.ui.button(label="Русский", emoji="🇷🇺", style=discord.ButtonStyle.secondary)
+    async def pick_ru(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._pick(interaction, "ru")
+
+    async def _pick(self, interaction: discord.Interaction, lang: str):
+        await interaction.client.db.set_user_lang(interaction.user.id, lang)
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content=t(lang, "answer_received"), view=self)
+        await self.cog.open_survey_channel(interaction, self.survey_name, lang, use_followup=True)
+
+
 class SurveyRunner:
     """Walks a single respondent through all questions inside their private channel."""
 
-    def __init__(self, cog, channel: discord.TextChannel, member: discord.Member, survey: dict):
+    def __init__(self, cog, channel: discord.TextChannel, member: discord.Member, survey: dict, lang: str):
         self.cog = cog
         self.channel = channel
         self.member = member
         self.survey = survey
-        self.lang = survey.get("lang") or DEFAULT_LANG
+        # Язык самого проходящего (выбранный им лично), а не "язык опроса" —
+        # опрос теперь двуязычный, показываем каждому на его языке.
+        self.lang = lang if lang in SUPPORTED_LANGS else DEFAULT_LANG
         self.answers = {}
 
     async def run(self):
         for idx, q in enumerate(self.survey["questions"]):
             answer = await self.ask(idx, q)
-            self.answers[str(idx)] = {"question": q["text"], "answer": answer}
+            self.answers[str(idx)] = {"question": loc(q["text"], self.lang), "answer": answer}
         await self.finish()
 
+    def _q_text(self, q):
+        return loc(q["text"], self.lang)
+
+    def _q_options(self, q):
+        opts = loc(q.get("options"), self.lang)
+        return list(opts) if opts else []
+
     def _other_label(self, q):
-        return q.get("other_label") or t(self.lang, "other_option_label")
+        return loc(q.get("other_label"), self.lang) or t(self.lang, "other_option_label")
 
     async def ask(self, idx, q):
         qtype = q["type"]
@@ -148,15 +225,17 @@ class SurveyRunner:
 
             btn.callback = cb
             view.add_item(btn)
+        min_label = loc(q.get("min_label"), self.lang)
+        max_label = loc(q.get("max_label"), self.lang)
         hint = ""
-        if q.get("min_label") or q.get("max_label"):
-            hint = f"\n_(​{lo} — {q.get('min_label', '')}, {hi} — {q.get('max_label', '')})_"
-        msg = await self.channel.send(f"**{idx + 1}. {q['text']}**{hint}", view=view)
+        if min_label or max_label:
+            hint = f"\n_(​{lo} — {min_label}, {hi} — {max_label})_"
+        msg = await self.channel.send(f"**{idx + 1}. {self._q_text(q)}**{hint}", view=view)
         return await self._wait(future, view, msg)
 
     async def _ask_single(self, idx, q):
         future = asyncio.get_event_loop().create_future()
-        options = list(q["options"])
+        options = self._q_options(q)
         has_other = q.get("other_option", False)
         other_label = self._other_label(q)
         select_options = [discord.SelectOption(label=o[:100], value=o) for o in options]
@@ -181,12 +260,12 @@ class SurveyRunner:
 
         select.callback = cb
         view.add_item(select)
-        msg = await self.channel.send(f"**{idx + 1}. {q['text']}**", view=view)
+        msg = await self.channel.send(f"**{idx + 1}. {self._q_text(q)}**", view=view)
         return await self._wait(future, view, msg)
 
     async def _ask_multi(self, idx, q):
         future = asyncio.get_event_loop().create_future()
-        options = list(q["options"])
+        options = self._q_options(q)
         has_other = q.get("other_option", False)
         other_label = self._other_label(q)
         select_options = [discord.SelectOption(label=o[:100], value=o) for o in options]
@@ -226,14 +305,14 @@ class SurveyRunner:
         view.add_item(select)
         view.add_item(confirm_btn)
         hint = t(self.lang, "multi_hint")
-        msg = await self.channel.send(f"**{idx + 1}. {q['text']}**{hint}", view=view)
+        msg = await self.channel.send(f"**{idx + 1}. {self._q_text(q)}**{hint}", view=view)
         return await self._wait(future, view, msg)
 
     async def _ask_yes_no_detail(self, idx, q):
         future = asyncio.get_event_loop().create_future()
         view = discord.ui.View(timeout=600)
-        yes_label = q.get("yes_label") or t(self.lang, "yes_label_default")
-        no_label = q.get("no_label") or t(self.lang, "no_label_default")
+        yes_label = loc(q.get("yes_label"), self.lang) or t(self.lang, "yes_label_default")
+        no_label = loc(q.get("no_label"), self.lang) or t(self.lang, "no_label_default")
         yes_btn = discord.ui.Button(label=yes_label, style=discord.ButtonStyle.success)
         no_btn = discord.ui.Button(label=no_label, style=discord.ButtonStyle.secondary)
 
@@ -256,17 +335,18 @@ class SurveyRunner:
         no_btn.callback = no_cb
         view.add_item(yes_btn)
         view.add_item(no_btn)
-        msg = await self.channel.send(f"**{idx + 1}. {q['text']}**", view=view)
+        msg = await self.channel.send(f"**{idx + 1}. {self._q_text(q)}**", view=view)
         return await self._wait(future, view, msg)
 
     async def _ask_text(self, idx, q):
         future = asyncio.get_event_loop().create_future()
         view = discord.ui.View(timeout=600)
         btn = discord.ui.Button(label=t(self.lang, "answer_button"), style=discord.ButtonStyle.primary)
+        q_text = self._q_text(q)
 
         async def cb(interaction):
             modal = FreeTextModal(
-                title=t(self.lang, "answer_modal_title"), label=q["text"][:45],
+                title=t(self.lang, "answer_modal_title"), label=q_text[:45],
                 long=True, lang=self.lang,
             )
             await interaction.response.send_modal(modal)
@@ -276,13 +356,13 @@ class SurveyRunner:
 
         btn.callback = cb
         view.add_item(btn)
-        msg = await self.channel.send(f"**{idx + 1}. {q['text']}**", view=view)
+        msg = await self.channel.send(f"**{idx + 1}. {q_text}**", view=view)
         return await self._wait(future, view, msg)
 
     async def finish(self):
         survey = await self.cog.bot.db.get_survey(self.survey["name"])
         await self.cog.bot.db.save_response(survey["id"], self.member.id, self.answers)
-        outro = self.survey.get("outro") or t(self.lang, "default_outro")
+        outro = loc(self.survey.get("outro"), self.lang) or t(self.lang, "default_outro")
         await self.channel.send(outro)
         await self.channel.send(t(self.lang, "channel_autodelete"))
         await asyncio.sleep(20)
@@ -344,13 +424,8 @@ class SurveyCog(commands.Cog, name="SurveyCog"):
         if not survey:
             await interaction.response.send_message(f"Опрос `{name}` не найден.", ephemeral=True)
             return
-        embed = discord.Embed(
-            title=survey.get("title") or name,
-            description=survey.get("intro") or "",
-            color=discord.Color.blurple(),
-        )
-        lang = survey.get("lang") or DEFAULT_LANG
-        view = SurveyStartView(name, label=t(lang, "take_survey_button"))
+        embed = build_bilingual_embed(survey, name)
+        view = SurveyStartView(name)
         await interaction.response.send_message(embed=embed, view=view)
 
     @survey_group.command(name="list", description="Список всех созданных опросов")
@@ -409,9 +484,39 @@ class SurveyCog(commands.Cog, name="SurveyCog"):
         if not survey:
             await interaction.response.send_message(t(DEFAULT_LANG, "survey_gone"), ephemeral=True)
             return
-        lang = survey.get("lang") or DEFAULT_LANG
+
+        # Если человек ещё ни разу не выбирал язык (ни через /language, ни
+        # в предыдущем опросе) — спрашиваем прямо тут, один раз, как мини-настройка,
+        # и только после выбора открываем канал с опросом.
+        existing_lang = await self.bot.db.get_user_lang_raw(interaction.user.id)
+        if existing_lang is None:
+            await interaction.response.send_message(
+                BILINGUAL_LANG_PROMPT,
+                view=SurveyLangPromptView(self, survey_name),
+                ephemeral=True,
+            )
+            return
+
+        # already_responded / allow_multiple проверяем уже на известном языке
         if not survey["allow_multiple"] and await self.bot.db.has_responded(survey["id"], interaction.user.id):
-            await interaction.response.send_message(t(lang, "already_responded"), ephemeral=True)
+            await interaction.response.send_message(t(existing_lang, "already_responded"), ephemeral=True)
+            return
+
+        await self.open_survey_channel(interaction, survey_name, existing_lang, use_followup=False)
+
+    async def open_survey_channel(self, interaction: discord.Interaction, survey_name: str,
+                                   lang: str, use_followup: bool):
+        """Создаёт приватный канал и запускает прохождение опроса на выбранном
+        языке. use_followup=True — когда мы уже ответили на interaction раньше
+        (после выбора языка кнопкой) и теперь должны использовать followup."""
+        survey = await self.bot.db.get_survey(survey_name)
+        if not survey:
+            send = interaction.followup.send if use_followup else interaction.response.send_message
+            await send(t(lang, "survey_gone"), ephemeral=True)
+            return
+        if not survey["allow_multiple"] and await self.bot.db.has_responded(survey["id"], interaction.user.id):
+            send = interaction.followup.send if use_followup else interaction.response.send_message
+            await send(t(lang, "already_responded"), ephemeral=True)
             return
 
         guild = interaction.guild
@@ -436,11 +541,13 @@ class SurveyCog(commands.Cog, name="SurveyCog"):
             category=category,
             overwrites=overwrites,
         )
-        await interaction.response.send_message(
-            t(lang, "opened_in_channel", channel=channel.mention), ephemeral=True
-        )
+        msg = t(lang, "opened_in_channel", channel=channel.mention)
+        if use_followup:
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
 
-        runner = SurveyRunner(self, channel, interaction.user, survey)
+        runner = SurveyRunner(self, channel, interaction.user, survey, lang)
         self.bot.loop.create_task(self._run_safely(runner))
 
     async def _run_safely(self, runner: SurveyRunner):
