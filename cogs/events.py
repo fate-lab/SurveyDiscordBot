@@ -13,6 +13,7 @@ STATUS_COLORS = {
     "open": discord.Color.blurple(),
     "full": discord.Color.orange(),
     "closed": discord.Color.dark_grey(),
+    "finished": discord.Color.dark_grey(),
 }
 
 # Тексты на карточке (embed, подписи кнопок) видят ВСЕ участники сразу —
@@ -90,7 +91,10 @@ def format_event_dt(iso_str: str) -> str:
 def build_event_embed(event: dict, joined: int, waiting: int) -> discord.Embed:
     capacity = event["capacity"]
     status = event.get("status", "active")
-    if status == "closed":
+    if status == "finished":
+        state = "finished"
+        state_label = "✅ Event finished — kept as history"
+    elif status == "closed":
         # Ручной режим: организатор не хочет, чтобы люди попадали сразу,
         # даже если формально есть свободные места — все заявки идут в очередь.
         state = "closed"
@@ -431,6 +435,33 @@ class EventsCog(commands.Cog, name="EventsCog"):
             await message.edit(embed=embed)
         except discord.HTTPException:
             pass
+
+    async def _finish_event(self, event: dict, guild: discord.Guild):
+        """Завершить событие: в отличие от _teardown_event, запись в БД и
+        история участников/листа ожидания НЕ удаляются — событие остаётся
+        доступным в веб-панели как архив. Удаляется только приватный канал
+        (он больше не нужен) и обновляется карточка в Discord — кнопка
+        "Join" убирается, статус меняется на "finished". Роль у участников
+        не трогаем — она остаётся как память об участии."""
+        if event.get("channel_id"):
+            channel = guild.get_channel(event["channel_id"])
+            if channel:
+                try:
+                    await channel.delete(reason=f"Событие #{event['id']} завершено")
+                except discord.HTTPException:
+                    pass
+        await self.bot.db.set_event_status(event["id"], "finished")
+        if event.get("announce_channel_id") and event.get("announce_message_id"):
+            ann_channel = guild.get_channel(event["announce_channel_id"])
+            if ann_channel:
+                try:
+                    msg = await ann_channel.fetch_message(event["announce_message_id"])
+                    fresh_event = await self.bot.db.get_event(event["id"])
+                    joined = await self.bot.db.count_participants(event["id"], "joined")
+                    embed = build_event_embed(fresh_event, joined, 0)
+                    await msg.edit(content="✅ *Это событие завершено.*", embed=embed, view=None)
+                except discord.HTTPException:
+                    pass
 
     async def _teardown_event(self, event: dict, guild: discord.Guild):
         # Роль у участников больше НЕ снимаем — она остаётся как память/бейдж

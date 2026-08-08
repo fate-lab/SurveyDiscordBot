@@ -188,6 +188,7 @@ def _display_name(bot, user_id: int) -> str:
 STATUS_LABELS = {
     "active": "🟢 обычный (авто-запись)",
     "closed": "🔒 ручной (заявки в очередь)",
+    "finished": "✅ завершено (архив)",
 }
 
 
@@ -291,6 +292,49 @@ async def event_detail(request: web.Request):
     except (ValueError, TypeError):
         pass
 
+    finished = event["status"] == "finished"
+
+    join_mode_card = f"""
+    <div class="card">
+      <h3>Режим приёма заявок</h3>
+      <p class="muted">
+        <b>🟢 Обычный</b> — пока есть свободные места, «Join» в Discord сразу даёт доступ.
+        Когда лимит достигнут — новые заявки сами падают в лист ожидания ниже.<br>
+        <b>🔒 Ручной</b> — вообще все, кто жмёт «Join», попадают в лист ожидания,
+        даже если по факту есть свободные места (например, после того как ты увеличил лимит,
+        но ещё не готов зачислять всех подряд). Ты сам одобряешь по одному, в любом порядке.
+      </p>
+      <p>Сейчас: <span class="pill">{STATUS_LABELS.get(event['status'], event['status'])}</span></p>
+      <form method="post" action="/events/{event_id}/{'reopen' if event['status'] == 'closed' else 'close'}">
+        <button class="secondary" type="submit">
+          {'🟢 Переключить на обычный режим' if event['status'] == 'closed' else '🔒 Переключить на ручной режим'}
+        </button>
+      </form>
+    </div>
+    """ if not finished else f"""
+    <div class="card">
+      <h3>Статус</h3>
+      <p><span class="pill">{STATUS_LABELS.get(event['status'], event['status'])}</span></p>
+      <p class="muted">Событие завершено: приватный канал удалён, карточка в Discord
+      обновлена и кнопка «Join» убрана. Список участников, лист ожидания и вся история
+      остаются здесь — можно скачать CSV в любой момент.</p>
+    </div>
+    """
+
+    finish_card = "" if finished else f"""
+    <div class="card">
+      <h3>Завершение события</h3>
+      <p class="muted">Когда событие прошло — нажми «Завершить». Приватный канал удалится,
+      карточка в Discord обновится (кнопка «Join» пропадёт), но само событие, список
+      участников и лист ожидания останутся здесь как история — их можно посмотреть
+      и выгрузить в CSV в любое время. Это не то же самое, что удаление ниже.</p>
+      <form method="post" action="/events/{event_id}/finish" style="display:inline"
+            onsubmit="return confirm('Завершить событие? Приватный канал будет удалён, но история (участники, лист ожидания) сохранится.')">
+        <button class="secondary" type="submit">✅ Завершить событие</button>
+      </form>
+    </div>
+    """
+
     body = f"""
     <div class="card">
       <div class="row" style="align-items:center;justify-content:space-between;">
@@ -334,22 +378,7 @@ async def event_detail(request: web.Request):
       (чтобы поменять — проще пересоздать событие).</p>
     </div>
 
-    <div class="card">
-      <h3>Режим приёма заявок</h3>
-      <p class="muted">
-        <b>🟢 Обычный</b> — пока есть свободные места, «Join» в Discord сразу даёт доступ.
-        Когда лимит достигнут — новые заявки сами падают в лист ожидания ниже.<br>
-        <b>🔒 Ручной</b> — вообще все, кто жмёт «Join», попадают в лист ожидания,
-        даже если по факту есть свободные места (например, после того как ты увеличил лимит,
-        но ещё не готов зачислять всех подряд). Ты сам одобряешь по одному, в любом порядке.
-      </p>
-      <p>Сейчас: <span class="pill">{STATUS_LABELS.get(event['status'], event['status'])}</span></p>
-      <form method="post" action="/events/{event_id}/{'reopen' if event['status'] == 'closed' else 'close'}">
-        <button class="secondary" type="submit">
-          {'🟢 Переключить на обычный режим' if event['status'] == 'closed' else '🔒 Переключить на ручной режим'}
-        </button>
-      </form>
-    </div>
+    {join_mode_card}
 
     <div class="card">
       <h3>Участники ({len(joined)}/{event['capacity']})</h3>
@@ -371,11 +400,15 @@ async def event_detail(request: web.Request):
       (joined &lt; лимита) — при необходимости сначала подними лимит в форме выше.</p>
     </div>
 
+    {finish_card}
+
     <div class="card">
       <h3>Опасная зона</h3>
+      <p class="muted">В отличие от «Завершить событие» выше, это удаляет событие и всю
+      историю по нему безвозвратно — используй, только если событие создано по ошибке.</p>
       <form method="post" action="/events/{event_id}/delete" style="display:inline"
-            onsubmit="return confirm('Удалить событие и приватный канал безвозвратно?')">
-        <button class="danger" type="submit">Удалить событие</button>
+            onsubmit="return confirm('Удалить событие и приватный канал безвозвратно? Это НЕ то же самое, что \\'Завершить\\' — история тоже удалится.')">
+        <button class="danger" type="submit">Удалить событие безвозвратно</button>
       </form>
     </div>
     """
@@ -498,6 +531,23 @@ async def event_reopen(request: web.Request):
     raise web.HTTPFound(f"/events/{event_id}?ok=Набор+снова+открыт")
 
 
+async def event_finish(request: web.Request):
+    bot = request.app["bot"]
+    event_id = int(request.match_info["event_id"])
+    event = await bot.db.get_event(event_id)
+    if not event:
+        raise web.HTTPFound("/events")
+    if event["status"] == "finished":
+        raise web.HTTPFound(f"/events/{event_id}?ok=Событие+уже+завершено")
+    guild = bot.get_guild(event["guild_id"])
+    cog = _events_cog(bot)
+    if cog and guild:
+        await cog._finish_event(event, guild)
+    else:
+        await bot.db.set_event_status(event_id, "finished")
+    raise web.HTTPFound(f"/events/{event_id}?ok=Событие+завершено+и+сохранено+в+истории")
+
+
 async def event_delete(request: web.Request):
     bot = request.app["bot"]
     event_id = int(request.match_info["event_id"])
@@ -545,5 +595,6 @@ def add_routes(app: web.Application):
     app.router.add_post("/events/{event_id}/participants/{user_id}/remove", participant_remove)
     app.router.add_post("/events/{event_id}/close", event_close)
     app.router.add_post("/events/{event_id}/reopen", event_reopen)
+    app.router.add_post("/events/{event_id}/finish", event_finish)
     app.router.add_post("/events/{event_id}/delete", event_delete)
     app.router.add_get("/events/{event_id}/export.csv", event_export_csv)
