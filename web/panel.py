@@ -764,7 +764,7 @@ async def survey_detail(request: web.Request):
     }}
     </script>
     """
-    return web.Response(text=page(survey.get("title") or name, body), content_type="text/html")
+    return web.Response(text=page(title_str(survey) or name, body), content_type="text/html")
 
 
 async def survey_export_csv(request: web.Request):
